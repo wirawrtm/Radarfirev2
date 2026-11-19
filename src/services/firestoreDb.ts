@@ -4,10 +4,13 @@ import {
   doc,
   getDoc,
   getDocs,
+  getDocsFromCache,
+  increment,
   onSnapshot,
   query,
   serverTimestamp,
   setDoc,
+  Timestamp,
   updateDoc,
   where,
   writeBatch,
@@ -43,6 +46,30 @@ import { cleanForMatch, extractExpFromLot, getValidCategory } from "../utils/for
 export interface FirestoreAllData {
   dataset: NormalizedDataset;
   accessRules: Record<string, Record<string, boolean>>;
+  syncMode?: "full" | "delta" | "cache";
+}
+
+const LAST_SYNC_STORAGE_KEY = "radar_fs_last_sync_v1";
+
+/**
+ * Generates collision-free Firestore document IDs safe for 200+ concurrent users
+ * without hot-counter bottlenecks or sequential length+1 overwrites.
+ * Strictly conforms to firestore.rules isValidId: ^[a-zA-Z0-9_\-]+$ (max 128 chars).
+ */
+export function generateUniqueFsId(prefix: string): string {
+  const cleanPrefix = toValidDocId(prefix, "ID").slice(0, 16);
+  const ts = Date.now().toString(36).toUpperCase();
+  let rand = "";
+  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+    const bytes = new Uint8Array(4);
+    crypto.getRandomValues(bytes);
+    rand = Array.from(bytes, (b) => b.toString(36).toUpperCase().padStart(2, "0"))
+      .join("")
+      .slice(0, 6);
+  } else {
+    rand = Math.random().toString(36).slice(2, 8).toUpperCase().padEnd(6, "0");
+  }
+  return toValidDocId(`${cleanPrefix}-${ts}-${rand}`);
 }
 
 const getScopedQuery = (colName: string, _user?: User | null) => {
@@ -177,15 +204,14 @@ function getSkuMetaDocId(prefix: "LOT" | "DR" | "LOG" | "HYB", targetId: string)
 }
 
 function buildSkuMetaOp(
-  ownerUid: string,
+  _ownerUid: string,
   prefix: "LOT" | "DR" | "LOG" | "HYB",
   targetId: string,
   skuVal: string,
 ): {
-  type: "create" | "update" | "delete";
+  type: "delete";
   colName: string;
   docId: string;
-  data?: Record<string, any>;
 } | null {
   if (!targetId) return null;
   const metaDocId = getSkuMetaDocId(prefix, targetId);
@@ -200,38 +226,15 @@ function buildSkuMetaOp(
 
   const cleanSku = clampStr(String(skuVal || "").trim().toUpperCase(), 80);
   if (cleanSku) {
+    // Store SKU directly on the entity document; stop creating SKU_* bloat in access_rules.
     targetMap.set(targetId, cleanSku);
-    if (knownSkuMetaDocIds.has(metaDocId)) {
-      return {
-        type: "update",
-        colName: "access_rules",
-        docId: metaDocId,
-        data: {
-          position: cleanSku,
-        },
-      };
-    }
-    knownSkuMetaDocIds.add(metaDocId);
-    return {
-      type: "create",
-      colName: "access_rules",
-      docId: metaDocId,
-      data: {
-        doc_id: metaDocId,
-        position: cleanSku,
-        home: false,
-        partner: false,
-        stock: false,
-        pog: false,
-        overview: false,
-        temp: false,
-        access: false,
-        ownerUid,
-      },
-    };
-  } else if (knownSkuMetaDocIds.has(metaDocId)) {
-    knownSkuMetaDocIds.delete(metaDocId);
+  } else {
     targetMap.delete(targetId);
+  }
+
+  // Clean up any legacy SKU_* document in access_rules if one exists
+  if (knownSkuMetaDocIds.has(metaDocId) && !cleanSku) {
+    knownSkuMetaDocIds.delete(metaDocId);
     return {
       type: "delete",
       colName: "access_rules",
@@ -321,8 +324,31 @@ function enrichLogsWithSku(rawLogs: OpnameLogFsDoc[]): OpnameLogFsDoc[] {
   });
 }
 
-export async function fetchAllFirestoreData(user: User | null): Promise<FirestoreAllData> {
-  const fetchCol = async <T,>(colName: string): Promise<T[]> => {
+function readLastSyncMs(): number {
+  try {
+    if (typeof localStorage === "undefined") return 0;
+    const raw = Number(localStorage.getItem(LAST_SYNC_STORAGE_KEY) || "0");
+    return Number.isFinite(raw) && raw > 0 ? raw : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function writeLastSyncMs(ms: number): void {
+  try {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(LAST_SYNC_STORAGE_KEY, String(ms));
+    }
+  } catch {
+    // ignore storage quota
+  }
+}
+
+export async function fetchAllFirestoreData(
+  user: User | null,
+  options?: { forceFull?: boolean },
+): Promise<FirestoreAllData> {
+  const fetchColFull = async <T,>(colName: string): Promise<T[]> => {
     try {
       const snap = await getDocs(getScopedQuery(colName, user));
       return snap.docs.map((d) => ({ doc_id: d.id, ...(d.data() as any) })) as T[];
@@ -334,22 +360,106 @@ export async function fetchAllFirestoreData(user: User | null): Promise<Firestor
     }
   };
 
+  const fetchColCachePlusDelta = async <T extends { doc_id: string }>(
+    colName: string,
+    sinceTs: Timestamp,
+  ): Promise<T[] | null> => {
+    try {
+      const colRef = getScopedQuery(colName, user);
+      const cacheSnap = await getDocsFromCache(colRef);
+      if (cacheSnap.empty && (colName === "employees" || colName === "partners" || colName === "hybrids")) {
+        return null;
+      }
+      const merged = new Map<string, T>();
+      cacheSnap.docs.forEach((d) => {
+        merged.set(d.id, { doc_id: d.id, ...(d.data() as any) } as T);
+      });
+
+      const deltaSnap = await getDocs(query(colRef, where("updatedAt", ">", sinceTs)));
+      deltaSnap.docs.forEach((d) => {
+        merged.set(d.id, { doc_id: d.id, ...(d.data() as any) } as T);
+      });
+      return Array.from(merged.values());
+    } catch (err) {
+      if (!user && isPermissionDeniedError(err)) {
+        throw err;
+      }
+      return null;
+    }
+  };
+
+  const nowMs = Date.now();
+  const lastSyncMs = !options?.forceFull ? readLastSyncMs() : 0;
+
+  if (lastSyncMs > 0) {
+    const sinceTs = Timestamp.fromMillis(Math.max(0, lastSyncMs - 5000));
+    const [
+      deltaEmployees,
+      deltaPartners,
+      deltaHybrids,
+      deltaLots,
+      deltaDrShipments,
+      deltaOpnameLogs,
+      deltaAccessDocs,
+    ] = await Promise.all([
+      fetchColCachePlusDelta<EmployeeFsDoc>("employees", sinceTs),
+      fetchColCachePlusDelta<PartnerFsDoc>("partners", sinceTs),
+      fetchColCachePlusDelta<HybridFsDoc>("hybrids", sinceTs),
+      fetchColCachePlusDelta<LotFsDoc>("lots", sinceTs),
+      fetchColCachePlusDelta<DrShipmentFsDoc>("dr_shipments", sinceTs),
+      fetchColCachePlusDelta<OpnameLogFsDoc>("opname_logs", sinceTs),
+      fetchColCachePlusDelta<any>("access_rules", sinceTs),
+    ]);
+
+    if (
+      deltaEmployees !== null &&
+      deltaPartners !== null &&
+      deltaHybrids !== null &&
+      deltaLots !== null &&
+      deltaDrShipments !== null &&
+      deltaOpnameLogs !== null &&
+      deltaAccessDocs !== null
+    ) {
+      writeLastSyncMs(nowMs);
+      const accessRules = parseAccessAndSkuMetaDocs(deltaAccessDocs);
+      const hybrids = deltaHybrids.map(unpackHybridDoc);
+      const lots = enrichLotsWithSku(deltaLots);
+      const dr_shipments = enrichDrWithSku(deltaDrShipments);
+      const opname_logs = enrichLogsWithSku(deltaOpnameLogs);
+
+      return {
+        dataset: {
+          employees: deltaEmployees,
+          partners: deltaPartners,
+          hybrids,
+          lots,
+          dr_shipments,
+          opname_logs,
+        },
+        accessRules,
+        syncMode: "delta",
+      };
+    }
+  }
+
   // Preflight a single collection in public mode so unpublished Console rules fail cleanly in 1 request without 7x error spam
   let preflightAccessDocs: any[] | null = null;
   if (!user) {
-    preflightAccessDocs = await fetchCol<any>("access_rules");
+    preflightAccessDocs = await fetchColFull<any>("access_rules");
   }
 
   const [employees, partners, rawHybrids, rawLots, rawDrShipments, rawOpnameLogs, accessDocs] =
     await Promise.all([
-      fetchCol<EmployeeFsDoc>("employees"),
-      fetchCol<PartnerFsDoc>("partners"),
-      fetchCol<HybridFsDoc>("hybrids"),
-      fetchCol<LotFsDoc>("lots"),
-      fetchCol<DrShipmentFsDoc>("dr_shipments"),
-      fetchCol<OpnameLogFsDoc>("opname_logs"),
-      preflightAccessDocs !== null ? Promise.resolve(preflightAccessDocs) : fetchCol<any>("access_rules"),
+      fetchColFull<EmployeeFsDoc>("employees"),
+      fetchColFull<PartnerFsDoc>("partners"),
+      fetchColFull<HybridFsDoc>("hybrids"),
+      fetchColFull<LotFsDoc>("lots"),
+      fetchColFull<DrShipmentFsDoc>("dr_shipments"),
+      fetchColFull<OpnameLogFsDoc>("opname_logs"),
+      preflightAccessDocs !== null ? Promise.resolve(preflightAccessDocs) : fetchColFull<any>("access_rules"),
     ]);
+
+  writeLastSyncMs(nowMs);
 
   const accessRules = parseAccessAndSkuMetaDocs(accessDocs);
   const hybrids = rawHybrids.map(unpackHybridDoc);
@@ -367,6 +477,7 @@ export async function fetchAllFirestoreData(user: User | null): Promise<Firestor
       opname_logs,
     },
     accessRules,
+    syncMode: "full",
   };
 }
 
@@ -380,6 +491,34 @@ export function subscribeToFirestoreCollections(
   let cachedLots: LotFsDoc[] | null = null;
   let cachedDrs: DrShipmentFsDoc[] | null = null;
   let cachedLogs: OpnameLogFsDoc[] | null = null;
+
+  let pendingDatasetPatch: Partial<NormalizedDataset> = {};
+  let pendingAccessRules: Record<string, Record<string, boolean>> | undefined;
+  let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const scheduleFlush = (
+    patchDataset?: Partial<NormalizedDataset>,
+    accessRules?: Record<string, Record<string, boolean>>,
+  ) => {
+    if (patchDataset) {
+      pendingDatasetPatch = { ...pendingDatasetPatch, ...patchDataset };
+    }
+    if (accessRules) {
+      pendingAccessRules = accessRules;
+    }
+    if (flushTimer) return;
+    flushTimer = setTimeout(() => {
+      flushTimer = null;
+      const ds = pendingDatasetPatch;
+      const ar = pendingAccessRules;
+      pendingDatasetPatch = {};
+      pendingAccessRules = undefined;
+      onUpdate({
+        ...(Object.keys(ds).length > 0 ? { dataset: ds as NormalizedDataset } : {}),
+        ...(ar ? { accessRules: ar } : {}),
+      });
+    }, 60);
+  };
 
   const listen = (colName: string, apply: (docs: any[]) => void) => {
     const q = getScopedQuery(colName, user);
@@ -400,48 +539,45 @@ export function subscribeToFirestoreCollections(
     unsubs.push(unsub);
   };
 
-  listen("employees", (docs) => onUpdate({ dataset: { employees: docs } as any }));
-  listen("partners", (docs) => onUpdate({ dataset: { partners: docs } as any }));
+  listen("employees", (docs) => scheduleFlush({ employees: docs }));
+  listen("partners", (docs) => scheduleFlush({ partners: docs }));
   listen("hybrids", (docs) => {
     cachedHybrids = docs;
-    onUpdate({ dataset: { hybrids: docs.map(unpackHybridDoc) } as any });
+    scheduleFlush({ hybrids: docs.map(unpackHybridDoc) });
   });
   listen("lots", (docs) => {
     cachedLots = docs;
-    onUpdate({
-      dataset: {
-        lots: enrichLotsWithSku(docs),
-        ...(cachedDrs ? { dr_shipments: enrichDrWithSku(cachedDrs) } : {}),
-        ...(cachedLogs ? { opname_logs: enrichLogsWithSku(cachedLogs) } : {}),
-      } as any,
+    scheduleFlush({
+      lots: enrichLotsWithSku(docs),
+      ...(cachedDrs ? { dr_shipments: enrichDrWithSku(cachedDrs) } : {}),
+      ...(cachedLogs ? { opname_logs: enrichLogsWithSku(cachedLogs) } : {}),
     });
   });
   listen("dr_shipments", (docs) => {
     cachedDrs = docs;
-    onUpdate({ dataset: { dr_shipments: enrichDrWithSku(docs) } as any });
+    scheduleFlush({ dr_shipments: enrichDrWithSku(docs) });
   });
   listen("opname_logs", (docs) => {
     cachedLogs = docs;
-    onUpdate({
-      dataset: {
-        opname_logs: enrichLogsWithSku(docs),
-      } as any,
-    });
+    scheduleFlush({ opname_logs: enrichLogsWithSku(docs) });
   });
   listen("access_rules", (docs) => {
     const accessRules = parseAccessAndSkuMetaDocs(docs);
-    onUpdate({
-      accessRules,
-      dataset: {
+    scheduleFlush(
+      {
         ...(cachedHybrids ? { hybrids: cachedHybrids.map(unpackHybridDoc) } : {}),
         ...(cachedLots ? { lots: enrichLotsWithSku(cachedLots) } : {}),
         ...(cachedDrs ? { dr_shipments: enrichDrWithSku(cachedDrs) } : {}),
         ...(cachedLogs ? { opname_logs: enrichLogsWithSku(cachedLogs) } : {}),
-      } as any,
-    });
+      },
+      accessRules,
+    );
   });
 
-  return () => unsubs.forEach((u) => u());
+  return () => {
+    if (flushTimer) clearTimeout(flushTimer);
+    unsubs.forEach((u) => u());
+  };
 }
 
 /**
@@ -989,9 +1125,6 @@ export async function saveUploadedDrToFirestore(
 
   const existingDrIds = new Set(currentDataset.dr_shipments.map((d) => toValidDocId(d.doc_id)));
 
-  let nextPrtNum = currentDataset.partners.length + 1;
-  let nextHybNum = currentDataset.hybrids.length + 1;
-  let nextDrNum = currentDataset.dr_shipments.length + 1;
   let createdPartners = 0;
 
   const hybridOps: any[] = [];
@@ -1001,7 +1134,17 @@ export async function saveUploadedDrToFirestore(
 
   const createdHybridKeys = new Set<string>();
   const createdPartnerKeys = new Set<string>();
-  const touchedLotIds = new Set<string>();
+  const lotDelta = new Map<
+    string,
+    {
+      exists: boolean;
+      addKg: number;
+      hybridId: string | null;
+      shippingDate: string;
+      expDate: string;
+      sku: string;
+    }
+  >();
 
   for (const row of parsedRows) {
     const rawLotNo = toValidDocId(String(row.lot || "").toUpperCase(), "");
@@ -1013,9 +1156,9 @@ export async function saveUploadedDrToFirestore(
     const hybKey = cleanForMatch(hybName);
     let hybDoc = existingHybridsByClean.get(hybKey);
     if (!hybDoc && !createdHybridKeys.has(hybKey)) {
-      let hybId = `HYB-${String(nextHybNum++).padStart(3, "0")}`;
+      let hybId = generateUniqueFsId("HYB");
       while (existingHybridIds.has(hybId)) {
-        hybId = `HYB-${String(nextHybNum++).padStart(3, "0")}`;
+        hybId = generateUniqueFsId("HYB");
       }
       existingHybridIds.add(hybId);
       hybDoc = {
@@ -1033,6 +1176,7 @@ export async function saveUploadedDrToFirestore(
         data: {
           doc_id: hybId,
           hybrid_name: packHybridNameWithSku(hybName, rowSku),
+          sku: rowSku || null,
           crop_type: hybDoc.crop_type,
           ownerUid,
         },
@@ -1044,9 +1188,9 @@ export async function saveUploadedDrToFirestore(
     const pKey = cleanForMatch(pName);
     let pDoc = existingPartnersByClean.get(pKey);
     if (!pDoc && pKey && !createdPartnerKeys.has(pKey)) {
-      let prtId = `PRT-${String(nextPrtNum++).padStart(3, "0")}`;
+      let prtId = generateUniqueFsId("PRT");
       while (existingPartnerIds.has(prtId)) {
-        prtId = `PRT-${String(nextPrtNum++).padStart(3, "0")}`;
+        prtId = generateUniqueFsId("PRT");
       }
       existingPartnerIds.add(prtId);
       pDoc = {
@@ -1080,73 +1224,36 @@ export async function saveUploadedDrToFirestore(
       });
     }
 
-    // 3. Ensure Lot
+    // 3. Aggregate Lot delta atomically per lotNo
     const shippingDate = clampStr(toIsoDateStr(row.drDate), 20, "2026-01-01");
     const expDate = clampStr(toIsoDateStr(row.expired || extractExpFromLot(row.lot)), 20);
     const rawQty = Number(row.qty);
-    const qtyKg = Number.isFinite(rawQty) && rawQty > 0 ? numQtySafe(rawQty) : 0;
-
-    function numQtySafe(n: number) {
-      return Number.isFinite(n) && n >= 0 ? n : 0;
-    }
+    const qtyKg = Number.isFinite(rawQty) && rawQty > 0 ? rawQty : 0;
 
     const cleanLotKey = cleanForMatch(rawLotNo);
     const existingLot = existingLotsById.get(rawLotNo) || existingLotsByClean.get(cleanLotKey);
     const lotNo = existingLot ? toValidDocId(existingLot.doc_id) : rawLotNo;
     const effectiveSku = rowSku || existingLot?.sku || hybDoc?.sku || "";
 
-    if (!existingLot && !touchedLotIds.has(lotNo)) {
-      const newLot: LotFsDoc = {
-        doc_id: lotNo,
-        hybrid_id: hybDoc ? hybDoc.doc_id : null,
-        ...(effectiveSku ? { sku: effectiveSku } : {}),
-        shipping_date: shippingDate,
-        exp_date: expDate,
-        initial_dr_kg: qtyKg,
-      };
-      existingLotsById.set(lotNo, newLot);
-      if (cleanLotKey) existingLotsByClean.set(cleanLotKey, newLot);
-      touchedLotIds.add(lotNo);
-      lotOps.push({
-        type: "create",
-        colName: "lots",
-        docId: lotNo,
-        data: {
-          doc_id: lotNo,
-          hybrid_id: newLot.hybrid_id,
-          shipping_date: shippingDate,
-          exp_date: expDate,
-          initial_dr_kg: qtyKg,
-          ownerUid,
-        },
+    const prevLotPending = lotDelta.get(lotNo);
+    if (prevLotPending) {
+      prevLotPending.addKg += qtyKg;
+      if (!prevLotPending.sku && effectiveSku) prevLotPending.sku = effectiveSku;
+    } else {
+      lotDelta.set(lotNo, {
+        exists: Boolean(existingLot),
+        addKg: qtyKg,
+        hybridId: existingLot?.hybrid_id || (hybDoc ? hybDoc.doc_id : null),
+        shippingDate: existingLot?.shipping_date || shippingDate,
+        expDate: existingLot?.exp_date || expDate,
+        sku: clampStr(effectiveSku, 80),
       });
-      if (effectiveSku) {
-        const skuOp = buildSkuMetaOp(ownerUid, "LOT", lotNo, effectiveSku);
-        if (skuOp) lotOps.push(skuOp);
-      }
-    } else if (existingLot && !touchedLotIds.has(lotNo)) {
-      touchedLotIds.add(lotNo);
-      lotOps.push({
-        type: "update",
-        colName: "lots",
-        docId: lotNo,
-        data: {
-          hybrid_id: existingLot.hybrid_id || (hybDoc ? hybDoc.doc_id : null),
-          shipping_date: existingLot.shipping_date || shippingDate,
-          exp_date: existingLot.exp_date || expDate,
-          initial_dr_kg: (existingLot.initial_dr_kg || 0) + qtyKg,
-        },
-      });
-      if (effectiveSku) {
-        const skuOp = buildSkuMetaOp(ownerUid, "LOT", lotNo, effectiveSku);
-        if (skuOp) lotOps.push(skuOp);
-      }
     }
 
     // 4. Create DR Shipment
-    let drId = `DR-${String(nextDrNum++).padStart(4, "0")}`;
+    let drId = generateUniqueFsId("DR");
     while (existingDrIds.has(drId)) {
-      drId = `DR-${String(nextDrNum++).padStart(4, "0")}`;
+      drId = generateUniqueFsId("DR");
     }
     existingDrIds.add(drId);
     drOps.push({
@@ -1158,16 +1265,45 @@ export async function saveUploadedDrToFirestore(
         shipping_date: shippingDate,
         partner_id: pDoc ? pDoc.doc_id : null,
         lot_no: lotNo,
+        sku: effectiveSku || null,
         exp_date: expDate,
         shipped_qty_kg: qtyKg,
         ownerUid,
       },
     });
-    if (effectiveSku) {
-      const drSkuOp = buildSkuMetaOp(ownerUid, "DR", drId, effectiveSku);
-      if (drSkuOp) drOps.push(drSkuOp);
-    }
   }
+
+  lotDelta.forEach((info, lotNo) => {
+    if (!info.exists) {
+      lotOps.push({
+        type: "create",
+        colName: "lots",
+        docId: lotNo,
+        data: {
+          doc_id: lotNo,
+          hybrid_id: info.hybridId,
+          sku: info.sku || null,
+          shipping_date: info.shippingDate,
+          exp_date: info.expDate,
+          initial_dr_kg: info.addKg,
+          ownerUid,
+        },
+      });
+    } else {
+      lotOps.push({
+        type: "update",
+        colName: "lots",
+        docId: lotNo,
+        data: {
+          hybrid_id: info.hybridId,
+          ...(info.sku ? { sku: info.sku } : {}),
+          shipping_date: info.shippingDate,
+          exp_date: info.expDate,
+          initial_dr_kg: increment(info.addKg),
+        },
+      });
+    }
+  });
 
   if (hybridOps.length > 0) await commitInChunks(hybridOps, 15);
   if (partnerOps.length > 0 || lotOps.length > 0) await commitInChunks([...partnerOps, ...lotOps], 15);
@@ -1221,7 +1357,6 @@ export async function saveBatchActivityToFirestore(
     currentDataset.opname_logs.map((l) => [toValidDocId(l.doc_id), l]),
   );
 
-  let nextHybNum = currentDataset.hybrids.length + 1;
   const stage1Hybrids: any[] = [];
   const stage2Lots: any[] = [];
   const stage3Logs: any[] = [];
@@ -1243,9 +1378,9 @@ export async function saveBatchActivityToFirestore(
     const hybClean = cleanForMatch(hybName);
     let hyb = existingHybrids.get(hybClean);
     if (!hyb) {
-      let hybId = `HYB-${String(nextHybNum++).padStart(3, "0")}`;
+      let hybId = generateUniqueFsId("HYB");
       while (existingHybridIds.has(hybId)) {
-        hybId = `HYB-${String(nextHybNum++).padStart(3, "0")}`;
+        hybId = generateUniqueFsId("HYB");
       }
       existingHybridIds.add(hybId);
       hyb = { doc_id: hybId, hybrid_name: hybName, crop_type: toStrictDivision(item.crops) };
@@ -1288,13 +1423,33 @@ export async function saveBatchActivityToFirestore(
     const monthPayload: Record<string, MonthlyOpnameCell | null> = {};
     let prev: number | null = null;
     FISCAL_MONTH_COLS.forEach(({ key }) => {
+      const isEditedMonth = Boolean(item[`edited_${key}`]);
       const val = Number(item[key]);
-      const hasVal = item[key] !== undefined && item[key] !== null && String(item[key]).trim() !== "" && val > 0;
+      const hasVal =
+        item[key] !== undefined &&
+        item[key] !== null &&
+        String(item[key]).trim() !== "" &&
+        (val > 0 || isEditedMonth);
       const prevCell = existingLog?.[key];
       if (hasVal || prevCell) {
-        const qty = hasVal ? Math.max(0, val) : Math.max(0, prevCell?.idle || 0);
-        const inKg = prev === null ? qty : qty > prev ? qty - prev : 0;
-        const pogKg = prev !== null && qty < prev ? prev - qty : 0;
+        const qty =
+          hasVal
+            ? Math.max(0, val)
+            : Math.max(0, prevCell?.idle || 0);
+        const inKg =
+          isEditedMonth && item[`in_${key}`] !== undefined
+            ? Math.max(0, Number(item[`in_${key}`]) || 0)
+            : prev === null
+              ? qty
+              : qty > prev
+                ? qty - prev
+                : 0;
+        const pogKg =
+          isEditedMonth && item[`pog_${key}`] !== undefined
+            ? Math.max(0, Number(item[`pog_${key}`]) || 0)
+            : prev !== null && qty < prev
+              ? prev - qty
+              : 0;
         monthPayload[key] = { in: inKg, idle: qty, pog: pogKg };
         prev = qty;
       } else {
@@ -1341,10 +1496,9 @@ export async function addHybridFirestore(
   const skuVal = clampStr(params.sku, 80);
 
   const existingIds = new Set(params.existingHybrids.map((h) => toValidDocId(h.doc_id)));
-  let nextNum = params.existingHybrids.length + 1;
-  let docId = `HYB-${String(nextNum++).padStart(3, "0")}`;
+  let docId = generateUniqueFsId("HYB");
   while (existingIds.has(docId)) {
-    docId = `HYB-${String(nextNum++).padStart(3, "0")}`;
+    docId = generateUniqueFsId("HYB");
   }
 
   const crop = toStrictDivision(params.crop_type);
@@ -1359,6 +1513,7 @@ export async function addHybridFirestore(
     await setDoc(doc(db, "hybrids", docId), {
       doc_id: docId,
       hybrid_name: packHybridNameWithSku(cleanName, skuVal),
+      sku: skuVal || null,
       crop_type: crop,
       ownerUid,
       createdAt: serverTimestamp(),
@@ -1406,10 +1561,9 @@ export async function addLotFirestore(
       finalHybridId = existing.doc_id;
     } else {
       const existingIds = new Set(params.existingHybrids.map((h) => toValidDocId(h.doc_id)));
-      let nextNum = params.existingHybrids.length + 1;
-      let hybId = `HYB-${String(nextNum++).padStart(3, "0")}`;
+      let hybId = generateUniqueFsId("HYB");
       while (existingIds.has(hybId)) {
-        hybId = `HYB-${String(nextNum++).padStart(3, "0")}`;
+        hybId = generateUniqueFsId("HYB");
       }
       finalHybridId = hybId;
       ops.push({
@@ -1419,6 +1573,7 @@ export async function addLotFirestore(
         data: {
           doc_id: hybId,
           hybrid_name: packHybridNameWithSku(hybName, skuVal),
+          sku: skuVal || null,
           crop_type: toStrictDivision(params.crop_type),
           ownerUid,
         },
@@ -1444,6 +1599,7 @@ export async function addLotFirestore(
     data: {
       doc_id: lotNo,
       hybrid_id: newLot.hybrid_id,
+      sku: skuVal || null,
       shipping_date: newLot.shipping_date,
       exp_date: newLot.exp_date,
       initial_dr_kg: newLot.initial_dr_kg,
@@ -1474,11 +1630,9 @@ export async function resolvePartnerIdByName(
 
   const newName = clampStr(nameStr.toUpperCase(), 160);
   const existingIds = new Set(existingPartners.map((p) => p.doc_id));
-  let nextNum = existingPartners.length + 1;
-  let finalId = `PTR-${String(nextNum).padStart(3, "0")}`;
+  let finalId = generateUniqueFsId("PRT");
   while (existingIds.has(finalId)) {
-    nextNum++;
-    finalId = `PTR-${String(nextNum).padStart(3, "0")}`;
+    finalId = generateUniqueFsId("PRT");
   }
 
   const newPartner: PartnerFsDoc = {
@@ -1549,10 +1703,9 @@ export async function addDrShipmentFirestore(
 
   const existingLot = params.existingLots.find((l) => toValidDocId(l.doc_id) === lotNo);
   const existingDrIds = new Set(params.existingDrShipments.map((d) => toValidDocId(d.doc_id)));
-  let nextDrNum = params.existingDrShipments.length + 1;
-  let drId = `DR-${String(nextDrNum++).padStart(4, "0")}`;
+  let drId = generateUniqueFsId("DR");
   while (existingDrIds.has(drId)) {
-    drId = `DR-${String(nextDrNum++).padStart(4, "0")}`;
+    drId = generateUniqueFsId("DR");
   }
 
   const ops: any[] = [];
@@ -1564,6 +1717,7 @@ export async function addDrShipmentFirestore(
       data: {
         doc_id: lotNo,
         hybrid_id: params.hybrid_id ? toValidDocId(params.hybrid_id) : null,
+        sku: skuVal || null,
         shipping_date: shippingDate,
         exp_date: expDate,
         initial_dr_kg: qtyKg,
@@ -1576,7 +1730,8 @@ export async function addDrShipmentFirestore(
       colName: "lots",
       docId: lotNo,
       data: {
-        initial_dr_kg: (existingLot.initial_dr_kg || 0) + qtyKg,
+        ...(skuVal ? { sku: skuVal } : {}),
+        initial_dr_kg: increment(qtyKg),
       },
     });
   }
@@ -1604,6 +1759,7 @@ export async function addDrShipmentFirestore(
       shipping_date: shippingDate,
       partner_id: newDr.partner_id,
       lot_no: lotNo,
+      sku: skuVal || null,
       exp_date: expDate,
       shipped_qty_kg: qtyKg,
       ownerUid,
@@ -1671,6 +1827,7 @@ export async function addOpnameLogFirestore(
       data: {
         doc_id: lotNo,
         hybrid_id: null,
+        sku: skuVal || null,
         shipping_date: "",
         exp_date: clampStr(toIsoDateStr(extractExpFromLot(lotNo)), 20),
         initial_dr_kg: 0,
@@ -1691,6 +1848,7 @@ export async function addOpnameLogFirestore(
       data: {
         partner_id: partnerId,
         lot_no: lotNo,
+        ...(skuVal ? { sku: skuVal } : {}),
         checker_id: checkerId ?? existingLog.checker_id ?? null,
         crop_year: cropYear,
         [params.monthKey]: cell,
@@ -1701,6 +1859,7 @@ export async function addOpnameLogFirestore(
       doc_id: logId,
       partner_id: partnerId,
       lot_no: lotNo,
+      sku: skuVal || null,
       checker_id: checkerId,
       crop_year: cropYear,
       ownerUid,
@@ -1786,7 +1945,6 @@ export async function bulkAddHybridsFirestore(
     ]),
   );
 
-  let nextNum = existingHybrids.length + 1;
   const opsMap = new Map<string, any>();
 
   for (const r of rows) {
@@ -1804,15 +1962,16 @@ export async function bulkAddHybridsFirestore(
         docId: existingExact.doc_id,
         data: {
           hybrid_name: packHybridNameWithSku(cleanName, skuVal),
+          sku: skuVal || null,
           crop_type: crop,
         },
       });
       continue;
     }
 
-    let docId = `HYB-${String(nextNum++).padStart(3, "0")}`;
+    let docId = generateUniqueFsId("HYB");
     while (existingIds.has(docId)) {
-      docId = `HYB-${String(nextNum++).padStart(3, "0")}`;
+      docId = generateUniqueFsId("HYB");
     }
     existingIds.add(docId);
 
@@ -1831,6 +1990,7 @@ export async function bulkAddHybridsFirestore(
       data: {
         doc_id: docId,
         hybrid_name: packHybridNameWithSku(cleanName, skuVal),
+        sku: skuVal || null,
         crop_type: crop,
         ownerUid,
       },
@@ -1877,6 +2037,7 @@ export async function bulkAddLotsFirestore(
       data: {
         doc_id: lotNo,
         hybrid_id: r.hybrid_id ? toValidDocId(r.hybrid_id) : null,
+        sku: skuVal || null,
         shipping_date: clampStr(toIsoDateStr(r.shipping_date), 20),
         exp_date: clampStr(toIsoDateStr(r.exp_date || extractExpFromLot(lotNo)), 20),
         initial_dr_kg: Number.isFinite(numDr) && numDr >= 0 ? numDr : 0,
@@ -1895,7 +2056,7 @@ export async function bulkAddLotsFirestore(
 
 /**
  * Bulk add multiple DR Shipment rows into Firestore /dr_shipments.
- * Stage 1 ensures all referenced /lots/{lot_no} exist/updated, Stage 2 writes DR rows.
+ * Stage 1 ensures all referenced /lots/{lot_no} exist/updated atomically, Stage 2 writes DR rows.
  */
 export async function bulkAddDrShipmentsFirestore(
   user: User | null | undefined,
@@ -1915,13 +2076,11 @@ export async function bulkAddDrShipmentsFirestore(
   const ownerUid = user?.uid || "public";
   const existingLotMap = new Map(existingLots.map((l) => [toValidDocId(l.doc_id), l]));
   const existingDrIds = new Set(existingDrShipments.map((d) => toValidDocId(d.doc_id)));
-  let nextDrNum = existingDrShipments.length + 1;
 
   const lotDelta = new Map<
     string,
     {
       exists: boolean;
-      baseKg: number;
       addKg: number;
       shippingDate: string;
       expDate: string;
@@ -1957,7 +2116,6 @@ export async function bulkAddDrShipmentsFirestore(
     } else {
       lotDelta.set(lotNo, {
         exists: Boolean(existingLot),
-        baseKg: existingLot?.initial_dr_kg || 0,
         addKg: qtyKg,
         shippingDate: existingLot?.shipping_date || shippingDate,
         expDate: existingLot?.exp_date || expDate,
@@ -1966,9 +2124,9 @@ export async function bulkAddDrShipmentsFirestore(
       });
     }
 
-    let drId = `DR-${String(nextDrNum++).padStart(4, "0")}`;
+    let drId = generateUniqueFsId("DR");
     while (existingDrIds.has(drId)) {
-      drId = `DR-${String(nextDrNum++).padStart(4, "0")}`;
+      drId = generateUniqueFsId("DR");
     }
     existingDrIds.add(drId);
 
@@ -1981,6 +2139,7 @@ export async function bulkAddDrShipmentsFirestore(
         shipping_date: shippingDate,
         partner_id: resolvedPartnerId,
         lot_no: lotNo,
+        sku: skuVal || null,
         exp_date: expDate,
         shipped_qty_kg: qtyKg,
         ownerUid,
@@ -1996,19 +2155,35 @@ export async function bulkAddDrShipmentsFirestore(
 
   const lotOps: any[] = [];
   lotDelta.forEach((info, lotNo) => {
-    lotOps.push({
-      type: (info.exists ? "update" : "create") as "create" | "update",
-      colName: "lots",
-      docId: lotNo,
-      data: {
-        doc_id: lotNo,
-        hybrid_id: info.hybridId,
-        shipping_date: info.shippingDate,
-        exp_date: info.expDate,
-        initial_dr_kg: info.baseKg + info.addKg,
-        ownerUid,
-      },
-    });
+    if (info.exists) {
+      lotOps.push({
+        type: "update" as const,
+        colName: "lots",
+        docId: lotNo,
+        data: {
+          hybrid_id: info.hybridId,
+          ...(info.sku ? { sku: info.sku } : {}),
+          shipping_date: info.shippingDate,
+          exp_date: info.expDate,
+          initial_dr_kg: increment(info.addKg),
+        },
+      });
+    } else {
+      lotOps.push({
+        type: "create" as const,
+        colName: "lots",
+        docId: lotNo,
+        data: {
+          doc_id: lotNo,
+          hybrid_id: info.hybridId,
+          sku: info.sku || null,
+          shipping_date: info.shippingDate,
+          exp_date: info.expDate,
+          initial_dr_kg: info.addKg,
+          ownerUid,
+        },
+      });
+    }
     if (info.sku) {
       const lotSkuOp = buildSkuMetaOp(ownerUid, "LOT", lotNo, info.sku);
       if (lotSkuOp) skuOpsMap.set(lotSkuOp.docId, lotSkuOp);
@@ -2058,6 +2233,7 @@ export async function bulkAddOpnameLogsFirestore(
         data: {
           doc_id: lotNo,
           hybrid_id: null,
+          sku: skuVal || null,
           shipping_date: "",
           exp_date: clampStr(toIsoDateStr(extractExpFromLot(lotNo)), 20),
           initial_dr_kg: 0,
@@ -2080,6 +2256,7 @@ export async function bulkAddOpnameLogsFirestore(
       const updateData: Record<string, any> = {
         partner_id: partnerId,
         lot_no: lotNo,
+        ...(skuVal ? { sku: skuVal } : {}),
         checker_id: checkerId ?? existingLog.checker_id ?? null,
         crop_year: cropYear,
       };
@@ -2104,6 +2281,7 @@ export async function bulkAddOpnameLogsFirestore(
         doc_id: logId,
         partner_id: partnerId,
         lot_no: lotNo,
+        sku: skuVal || null,
         checker_id: checkerId,
         crop_year: cropYear,
         ownerUid,
@@ -2161,16 +2339,15 @@ export async function bulkAddPartnersFirestore(
   const ownerUid = user?.uid || "public";
   const existingIds = new Set(existingPartners.map((p) => toValidDocId(p.doc_id)));
   const empById = new Map(existingEmployees.map((e) => [toValidDocId(e.doc_id), e]));
-  let nextNum = existingPartners.length + 1;
   const ops: any[] = [];
 
   for (const r of rows) {
     const partnerName = clampStr(r.partner_name, 160);
     if (!partnerName) continue;
 
-    let docId = `PRT-${String(nextNum++).padStart(3, "0")}`;
+    let docId = generateUniqueFsId("PRT");
     while (existingIds.has(docId)) {
-      docId = `PRT-${String(nextNum++).padStart(3, "0")}`;
+      docId = generateUniqueFsId("PRT");
     }
     existingIds.add(docId);
 
@@ -2219,7 +2396,6 @@ export async function bulkAddEmployeesFirestore(
 ): Promise<Array<{ doc_id: string; username: string; password: string }>> {
   const ownerUid = user?.uid || "public";
   const existingIds = new Set(existingEmployees.map((e) => toValidDocId(e.doc_id)));
-  let nextNum = existingEmployees.length + 1;
   const ops: any[] = [];
   const createdCreds: Array<{ doc_id: string; username: string; password: string }> = [];
 
@@ -2227,9 +2403,9 @@ export async function bulkAddEmployeesFirestore(
     const fullName = clampStr(r.full_name, 120);
     if (!fullName) continue;
 
-    let docId = `EMP-${String(nextNum++).padStart(3, "0")}`;
+    let docId = generateUniqueFsId("EMP");
     while (existingIds.has(docId)) {
-      docId = `EMP-${String(nextNum++).padStart(3, "0")}`;
+      docId = generateUniqueFsId("EMP");
     }
     existingIds.add(docId);
 
@@ -2321,6 +2497,7 @@ export async function bulkUpdateHybridsFirestore(
         docId: toValidDocId(r.doc_id),
         data: {
           hybrid_name: packHybridNameWithSku(r.hybrid_name, skuVal),
+          sku: skuVal || null,
           crop_type: toStrictDivision(r.crop_type),
         },
       };
@@ -2362,6 +2539,7 @@ export async function bulkUpdateLotsFirestore(
         docId: lotId,
         data: {
           hybrid_id: r.hybrid_id ? toValidDocId(r.hybrid_id) : null,
+          sku: skuVal || null,
           shipping_date: clampStr(toIsoDateStr(r.shipping_date), 20),
           exp_date: clampStr(toIsoDateStr(r.exp_date || extractExpFromLot(lotId)), 20),
           initial_dr_kg: Number.isFinite(numDr) && numDr >= 0 ? numDr : 0,
@@ -2427,6 +2605,7 @@ export async function bulkUpdateDrShipmentsFirestore(
         data: {
           doc_id: lotNo,
           hybrid_id: null,
+          sku: skuVal || null,
           shipping_date: shippingDate,
           exp_date: expDate,
           initial_dr_kg: qtyKg,
@@ -2443,6 +2622,7 @@ export async function bulkUpdateDrShipmentsFirestore(
         shipping_date: shippingDate,
         partner_id: resolvedPartnerId,
         lot_no: lotNo,
+        sku: skuVal || null,
         exp_date: expDate,
         shipped_qty_kg: qtyKg,
       },
@@ -2495,6 +2675,7 @@ export async function bulkUpdateOpnameLogsFirestore(
         data: {
           doc_id: lotNo,
           hybrid_id: null,
+          sku: skuVal || null,
           shipping_date: "",
           exp_date: clampStr(toIsoDateStr(extractExpFromLot(lotNo)), 20),
           initial_dr_kg: 0,
@@ -2506,6 +2687,7 @@ export async function bulkUpdateOpnameLogsFirestore(
     const updateData: Record<string, any> = {
       partner_id: r.partner_id ? toValidDocId(r.partner_id) : null,
       lot_no: lotNo,
+      sku: skuVal || null,
       checker_id: r.checker_id ? toValidDocId(r.checker_id) : null,
       crop_year: clampStr(r.crop_year || "FY2026", 12, "FY2026"),
     };

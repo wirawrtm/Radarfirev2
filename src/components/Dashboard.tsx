@@ -40,13 +40,13 @@ import { useFirebase } from "../contexts/FirebaseContext";
 import {
   buildNormalizedCollections,
   hydrateDashboardFromNormalized,
-  padFsId,
   toValidDocId,
 } from "../utils/firestoreNormalization";
 import {
   deleteEmployeeFirestore,
   deletePartnerFirestore,
   ensureSuperUserAdityaFirestore,
+  generateUniqueFsId,
   saveAccessRulesFirestore,
   saveBatchActivityToFirestore,
   upsertEmployeeFirestore,
@@ -149,6 +149,7 @@ const Dashboard = ({
     isMigrating,
     migrationStage,
     reloadFromFirestore,
+    removeLocalFirestoreDocs,
     retryFirestoreSync,
   } = useFirebase();
   const [copiedBannerRules, setCopiedBannerRules] = useState(false);
@@ -488,6 +489,7 @@ const Dashboard = ({
     }
     try {
       await saveAccessRulesFirestore(firebaseUser, filteredRules);
+      await reloadFromFirestore();
       setAccessSaveSuccess(true);
     } catch (err: any) {
       console.error("Error saving access rules:", err);
@@ -1498,9 +1500,13 @@ const Dashboard = ({
       return;
     }
     hasSeededSuperUserRef.current = true;
-    ensureSuperUserAdityaFirestore(firebaseUser, firestoreDataset.employees).catch((err) => {
-      console.warn("Gagal auto-seed super user adityahead:", err);
-    });
+    ensureSuperUserAdityaFirestore(firebaseUser, firestoreDataset.employees)
+      .then((seeded) => {
+        if (seeded) reloadFromFirestore();
+      })
+      .catch((err) => {
+        console.warn("Gagal auto-seed super user adityahead:", err);
+      });
   }, [isAuthReady, isLoadingFirestore, isMigrating, firestoreReadError, firestoreDataset, firebaseUser]);
 
   // Live real-time hydration directly from Firestore (supports both Public Read-Only & Authorized Admin)
@@ -1801,9 +1807,15 @@ const Dashboard = ({
               ...item,
               stock: nQty,
               condition: cond,
+              isEdited: true,
               user: userData.name,
               timestamp: getCurrentTimestamp(),
               [currentMonthKey]: nQty,
+              [`in_${currentMonthKey}`]: nQty > prevVal ? nQty - prevVal : 0,
+              [`pog_${currentMonthKey}`]: nQty < prevVal ? prevVal - nQty : 0,
+              [`has_${currentMonthKey}`]: true,
+              [`edited_${currentMonthKey}`]: true,
+              [`upd_${currentMonthKey}`]: "sales",
             };
           }
           return item;
@@ -1831,23 +1843,29 @@ const Dashboard = ({
         selectedKiosk,
         workingCategoryMap,
       );
+      const initQty = safeParseFloat(qty);
       const newItem = {
         id: "local_" + Date.now(),
         lot: cleanLot,
         hybrid: cleanHybrid,
         crops: cleanCrops,
         drDate: cleanDrDate,
-        stock: safeParseFloat(qty),
+        stock: initQty,
         aging: cleanAging,
         expired: cleanExpired,
         kiosk: selectedKiosk,
         condition: "new", // BARU
         isNew: true,
-        originalStock: safeParseFloat(qty),
+        originalStock: initQty,
         user: userData.name,
         timestamp: getCurrentTimestamp(),
         category: resolvedCategory,
-        [currentMonthKey]: safeParseFloat(qty),
+        [currentMonthKey]: initQty,
+        [`in_${currentMonthKey}`]: initQty,
+        [`pog_${currentMonthKey}`]: 0,
+        [`has_${currentMonthKey}`]: true,
+        [`edited_${currentMonthKey}`]: true,
+        [`upd_${currentMonthKey}`]: "sales",
       };
       setWorkingData((prev) => [newItem, ...prev]);
     }
@@ -1887,12 +1905,31 @@ const Dashboard = ({
     setWorkingData((prev) =>
       prev.map((item) => {
         if (item.id === id) {
-          const nQty = safeParseFloat(newQty);
-          const prevVal =
+          const nQty = Math.max(0, safeParseFloat(newQty));
+          let prevVal =
             item[prevMonthKey] !== undefined ? safeParseFloat(item[prevMonthKey]) : 0;
+          const fiscalOrder = ["apr", "mei", "jun", "jul", "ags", "sep", "okt", "nov", "des", "jan", "feb", "mar"];
+          const curFiscalIdx = fiscalOrder.indexOf(currentMonthKey);
+          for (let i = curFiscalIdx - 1; i >= 0; i--) {
+            const mk = fiscalOrder[i];
+            if (item[`has_${mk}`]) {
+              prevVal = safeParseFloat(item[mk]);
+              break;
+            }
+          }
+          const explicitIn = (updatedFields as any)?.[`in_${currentMonthKey}`];
+          const explicitOut = (updatedFields as any)?.[`pog_${currentMonthKey}`];
 
           let cond = "tetap";
-          if (prevVal === 0) {
+          if (typeof explicitIn === "number" || typeof explicitOut === "number") {
+            const inNum = Number(explicitIn) || 0;
+            const outNum = Number(explicitOut) || 0;
+            if (item.isNew && outNum === 0) cond = "new";
+            else if (outNum > 0 && nQty < prevVal + inNum) cond = "berkurang";
+            else if (inNum > outNum || nQty > prevVal) cond = "bertambah";
+            else if (outNum > 0) cond = "berkurang";
+            else cond = "tetap";
+          } else if (prevVal === 0) {
             cond = item.isNew ? "new" : nQty > 0 ? "bertambah" : "tetap";
           } else {
             if (nQty > prevVal) cond = "bertambah";
@@ -1911,6 +1948,7 @@ const Dashboard = ({
             category: resolvedCategory,
             stock: nQty,
             condition: cond,
+            isEdited: true,
             user: userData.name,
             timestamp: getCurrentTimestamp(),
             [currentMonthKey]: nQty,
@@ -1966,6 +2004,7 @@ const Dashboard = ({
     workingData.some(
       (i) =>
         i.isNew ||
+        i.isEdited ||
         i.condition !== "tetap" ||
         String(i.user || "")
           .trim()
@@ -1993,6 +2032,7 @@ const Dashboard = ({
         items: currentKioskItems,
         currentDataset: normalizedSnapshot,
       });
+      await reloadFromFirestore();
       setConsolidationSuccessMsg("Aktivitas opname berhasil disimpan ke Firestore!");
       setTimeout(() => setConsolidationSuccessMsg(""), 4000);
     } catch (e: any) {
@@ -2118,13 +2158,13 @@ const Dashboard = ({
           cleanForMatch(e.username) === cleanForMatch(newPic || ""),
       );
       const existingPartnerIds = new Set(normalizedSnapshot.partners.map((p) => p.doc_id));
-      let nextPrtNum = normalizedSnapshot.partners.length + 1;
       let partnerDocId = matchedPartner?.doc_id;
       if (!partnerDocId && isAdd) {
-        while (existingPartnerIds.has(padFsId("PRT", nextPrtNum, 3))) {
-          nextPrtNum++;
+        let genId = generateUniqueFsId("PRT");
+        while (existingPartnerIds.has(genId)) {
+          genId = generateUniqueFsId("PRT");
         }
-        partnerDocId = padFsId("PRT", nextPrtNum, 3);
+        partnerDocId = genId;
       } else if (!partnerDocId) {
         partnerDocId = toValidDocId(String(id));
       }
@@ -2149,6 +2189,7 @@ const Dashboard = ({
         },
         isAdd || !matchedPartner,
       );
+      await reloadFromFirestore();
       setPartnerEditModal({ isOpen: false, item: null });
       setConsolidationSuccessMsg("Data partner berhasil disimpan ke Firestore.");
       setTimeout(() => setConsolidationSuccessMsg(""), 4000);
@@ -2177,6 +2218,7 @@ const Dashboard = ({
       );
       if (matched) {
         await deletePartnerFirestore(matched.doc_id);
+        removeLocalFirestoreDocs("partners", [matched.doc_id]);
       }
       setPartnerDeleteModal({ isOpen: false, item: null });
       setConsolidationSuccessMsg("Partner berhasil dihapus dari Firestore.");
@@ -2206,13 +2248,13 @@ const Dashboard = ({
         (e) => cleanForMatch(e.full_name) === cleanForMatch(updatedFields.upline || ""),
       );
       const existingEmpIds = new Set(normalizedSnapshot.employees.map((e) => e.doc_id));
-      let nextEmpNum = normalizedSnapshot.employees.length + 1;
       let empDocId = existingEmp?.doc_id;
       if (!empDocId) {
-        while (existingEmpIds.has(padFsId("EMP", nextEmpNum, 3))) {
-          nextEmpNum++;
+        let genId = generateUniqueFsId("EMP");
+        while (existingEmpIds.has(genId)) {
+          genId = generateUniqueFsId("EMP");
         }
-        empDocId = padFsId("EMP", nextEmpNum, 3);
+        empDocId = genId;
       }
       const docId = empDocId;
       const rawDiv = String(updatedFields.group || existingEmp?.division_group || "")
@@ -2260,6 +2302,7 @@ const Dashboard = ({
         }
       }
 
+      await reloadFromFirestore();
       setEmployeeEditModal({ isOpen: false, item: null });
       setConsolidationSuccessMsg("Data karyawan berhasil disimpan ke Firestore.");
       setTimeout(() => setConsolidationSuccessMsg(""), 4000);
@@ -2282,6 +2325,7 @@ const Dashboard = ({
       );
       if (existingEmp) {
         await deleteEmployeeFirestore(existingEmp.doc_id);
+        removeLocalFirestoreDocs("employees", [existingEmp.doc_id]);
       }
       setEmployeeDeleteModal({ isOpen: false, item: null });
       setConsolidationSuccessMsg("Karyawan berhasil dihapus dari Firestore.");

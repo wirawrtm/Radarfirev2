@@ -56,7 +56,7 @@ export const DatabaseAddModal: React.FC<DatabaseAddModalProps> = ({
   lotsCol,
   onSuccess,
 }) => {
-  const { firebaseUser, firestoreDataset } = useFirebase();
+  const { firebaseUser, firestoreDataset, reloadFromFirestore } = useFirebase();
   const [targetCol, setTargetCol] = useState<OperationalCollectionKey>(initialCollection);
   const [isSaving, setIsSaving] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -170,6 +170,7 @@ export const DatabaseAddModal: React.FC<DatabaseAddModalProps> = ({
           crop_type: cropType,
           existingHybrids: fsHybrids,
         });
+        await reloadFromFirestore();
         onSuccess(`Hybrid ${created.doc_id} (${created.hybrid_name}) berhasil ditambahkan ke Firestore.`, "hybrids");
         onClose();
         return;
@@ -187,6 +188,7 @@ export const DatabaseAddModal: React.FC<DatabaseAddModalProps> = ({
           existingHybrids: fsHybrids,
           existingLots: fsLots,
         });
+        await reloadFromFirestore();
         onSuccess(`Lot ${created.doc_id} berhasil disimpan ke Firestore.`, "lots");
         onClose();
         return;
@@ -204,6 +206,7 @@ export const DatabaseAddModal: React.FC<DatabaseAddModalProps> = ({
           existingDrShipments: fsDrShipments,
           existingPartners: fsPartners,
         });
+        await reloadFromFirestore();
         onSuccess(`DR Shipment ${created.doc_id} (Lot ${created.lot_no}) berhasil ditambahkan ke Firestore.`, "dr_shipments");
         onClose();
         return;
@@ -222,6 +225,7 @@ export const DatabaseAddModal: React.FC<DatabaseAddModalProps> = ({
           existingLots: fsLots,
           existingLogs: fsOpnameLogs,
         });
+        await reloadFromFirestore();
         onSuccess(`Log Opname untuk Lot ${opLotNo.toUpperCase()} (${opMonthKey.toUpperCase()}) berhasil disimpan ke Firestore.`, "opname_logs");
         onClose();
       }

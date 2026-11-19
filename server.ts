@@ -1,5 +1,6 @@
 import express from "express";
 import path from "path";
+import zlib from "zlib";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import {
@@ -32,6 +33,68 @@ dotenv.config();
 
 const app = express();
 const PORT = 3000;
+
+const COMPRESSIBLE_CT_RE =
+  /^(text\/|application\/(javascript|x-javascript|json|xml)|image\/svg\+xml)/i;
+
+app.use((req, res, next) => {
+  const acceptEncoding = String(req.headers["accept-encoding"] || "");
+  if (!acceptEncoding.includes("gzip") || req.method === "HEAD") {
+    return next();
+  }
+
+  const origWrite = res.write.bind(res);
+  const origEnd = res.end.bind(res);
+  const chunks: Buffer[] = [];
+  let bypassed = false;
+
+  const shouldCompress = () => {
+    if (res.headersSent) return false;
+    const ct = String(res.getHeader("content-type") || "");
+    const existingEnc = res.getHeader("content-encoding");
+    return !existingEnc && COMPRESSIBLE_CT_RE.test(ct);
+  };
+
+  res.write = ((chunk: any, encoding?: any, cb?: any): boolean => {
+    if (bypassed) {
+      return origWrite(chunk, encoding, cb);
+    }
+    if (!shouldCompress()) {
+      bypassed = true;
+      return origWrite(chunk, encoding, cb);
+    }
+    if (chunk) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, encoding));
+    }
+    if (typeof encoding === "function") encoding();
+    else if (typeof cb === "function") cb();
+    return true;
+  }) as any;
+
+  res.end = ((chunk?: any, encoding?: any, cb?: any): any => {
+    if (bypassed) {
+      return origEnd(chunk, encoding, cb);
+    }
+    if (!shouldCompress()) {
+      bypassed = true;
+      return origEnd(chunk, encoding, cb);
+    }
+    if (chunk && typeof chunk !== "function") {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, encoding));
+    }
+    const raw = Buffer.concat(chunks);
+    if (raw.length < 1024) {
+      return origEnd(raw, cb || (typeof encoding === "function" ? encoding : undefined));
+    }
+    res.setHeader("Content-Encoding", "gzip");
+    res.setHeader("Vary", "Accept-Encoding");
+    res.removeHeader("Content-Length");
+    const gz = zlib.gzipSync(raw, { level: 6 });
+    return origEnd(gz, cb || (typeof encoding === "function" ? encoding : undefined));
+  }) as any;
+
+  next();
+});
 
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -173,8 +236,21 @@ export class ErrorOverlay {}
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
+    app.use(
+      express.static(distPath, {
+        etag: true,
+        lastModified: true,
+        setHeaders: (res, filePath) => {
+          if (filePath.includes(`${path.sep}assets${path.sep}`)) {
+            res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+          } else if (filePath.endsWith(".html")) {
+            res.setHeader("Cache-Control", "no-cache");
+          }
+        },
+      }),
+    );
     app.get("*", (_req, res) => {
+      res.setHeader("Cache-Control", "no-cache");
       res.sendFile(path.join(distPath, "index.html"));
     });
   }

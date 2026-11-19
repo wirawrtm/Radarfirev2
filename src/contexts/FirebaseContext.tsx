@@ -37,6 +37,9 @@ interface FirebaseContextValue {
   isLoadingFirestore: boolean;
   isMigrating: boolean;
   migrationStage: string | null;
+  syncMode: "full" | "delta" | "cache" | null;
+  liveSyncEnabled: boolean;
+  setLiveSyncEnabled: React.Dispatch<React.SetStateAction<boolean>>;
   connectGoogle: () => Promise<User>;
   disconnectGoogle: () => Promise<void>;
   migrateDatasetToFirestore: (
@@ -44,7 +47,8 @@ interface FirebaseContextValue {
     accessRules: Record<string, Record<string, boolean>>,
   ) => Promise<{ totalDocs: number }>;
   syncFromSourceToFirestore: () => Promise<{ totalDocs: number }>;
-  reloadFromFirestore: () => Promise<NormalizedDataset | null>;
+  reloadFromFirestore: (options?: { forceFull?: boolean }) => Promise<NormalizedDataset | null>;
+  removeLocalFirestoreDocs: (colName: keyof NormalizedDataset, docIds: string[]) => void;
   retryFirestoreSync: () => void;
 }
 
@@ -73,6 +77,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [isFirestoreConnected, setIsFirestoreConnected] = useState<boolean | null>(null);
   const [isMigrating, setIsMigrating] = useState(false);
   const [migrationStage, setMigrationStage] = useState<string | null>(null);
+  const [syncMode, setSyncMode] = useState<"full" | "delta" | "cache" | null>(null);
+  const [liveSyncEnabled, setLiveSyncEnabled] = useState(false);
   const [listenerRetryTick, setListenerRetryTick] = useState(0);
   const autoSyncAttemptedRef = useRef(false);
 
@@ -103,43 +109,63 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       isBootstrappedAdminEmail(firebaseUser.email),
   );
 
-  const reloadFromFirestore = useCallback(async (): Promise<NormalizedDataset | null> => {
-    const current = auth.currentUser;
-    const verifiedAdmin =
-      current && current.emailVerified && isBootstrappedAdminEmail(current.email)
-        ? current
-        : null;
+  const reloadFromFirestore = useCallback(
+    async (options?: { forceFull?: boolean }): Promise<NormalizedDataset | null> => {
+      const current = auth.currentUser;
+      const verifiedAdmin =
+        current && current.emailVerified && isBootstrappedAdminEmail(current.email)
+          ? current
+          : null;
 
-    setIsLoadingFirestore(true);
-    try {
-      const connected = await testConnection();
-      setIsFirestoreConnected(connected);
-      if (verifiedAdmin) {
-        await ensureUserBootstrap(verifiedAdmin);
+      setIsLoadingFirestore(true);
+      try {
+        const connected = await testConnection();
+        setIsFirestoreConnected(connected);
+        if (verifiedAdmin) {
+          await ensureUserBootstrap(verifiedAdmin);
+        }
+        const data = await fetchAllFirestoreData(verifiedAdmin, options);
+        setFirestoreReadError(null);
+        setSyncMode(data.syncMode || "full");
+        setFirestoreDataset(data.dataset);
+        if (Object.keys(data.accessRules).length > 0) {
+          setFirestoreAccessRules(data.accessRules);
+        }
+        return data.dataset;
+      } catch (err: any) {
+        const errText = String(err?.message || err || "");
+        const isPermDenied =
+          errText.toLowerCase().includes("permission") ||
+          errText.toLowerCase().includes("insufficient");
+        setFirestoreReadError(
+          isPermDenied
+            ? `Akses baca & edit belum aktif di Firestore Rules (${ACTIVE_DB_LABEL}). Login dengan ${BOOTSTRAPPED_ADMIN_EMAIL} atau publikasikan firestore.rules.`
+            : `Gagal terhubung ke database Firebase (${ACTIVE_DB_LABEL}). Periksa koneksi internet Anda.`,
+        );
+        setFirestoreDataset((prev) => prev || EMPTY_DATASET);
+        return null;
+      } finally {
+        setIsLoadingFirestore(false);
       }
-      const data = await fetchAllFirestoreData(verifiedAdmin);
-      setFirestoreReadError(null);
-      setFirestoreDataset(data.dataset);
-      if (Object.keys(data.accessRules).length > 0) {
-        setFirestoreAccessRules(data.accessRules);
-      }
-      return data.dataset;
-    } catch (err: any) {
-      const errText = String(err?.message || err || "");
-      const isPermDenied =
-        errText.toLowerCase().includes("permission") ||
-        errText.toLowerCase().includes("insufficient");
-      setFirestoreReadError(
-        isPermDenied
-          ? `Akses baca & edit belum aktif di Firestore Rules (${ACTIVE_DB_LABEL}). Login dengan ${BOOTSTRAPPED_ADMIN_EMAIL} atau publikasikan firestore.rules.`
-          : `Gagal terhubung ke database Firebase (${ACTIVE_DB_LABEL}). Periksa koneksi internet Anda.`,
-      );
-      setFirestoreDataset((prev) => prev || EMPTY_DATASET);
-      return null;
-    } finally {
-      setIsLoadingFirestore(false);
-    }
-  }, []);
+    },
+    [],
+  );
+
+  const removeLocalFirestoreDocs = useCallback(
+    (colName: keyof NormalizedDataset, docIds: string[]) => {
+      const idSet = new Set(docIds.map((id) => String(id || "").trim()).filter(Boolean));
+      if (idSet.size === 0) return;
+      setFirestoreDataset((prev) => {
+        if (!prev) return prev;
+        const currentList = (prev[colName] || []) as any[];
+        return {
+          ...prev,
+          [colName]: currentList.filter((item) => !idSet.has(String(item?.doc_id || ""))),
+        };
+      });
+    },
+    [],
+  );
 
   const migrateDatasetToFirestore = useCallback(
     async (
@@ -156,7 +182,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           accessRules,
           (msg) => setMigrationStage(msg),
         );
-        await reloadFromFirestore();
+        await reloadFromFirestore({ forceFull: true });
         return res;
       } finally {
         setIsMigrating(false);
@@ -201,7 +227,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         (msg) => setMigrationStage(msg),
         { replaceStale: true },
       );
-      await reloadFromFirestore();
+      await reloadFromFirestore({ forceFull: true });
       return res;
     } finally {
       setIsMigrating(false);
@@ -209,7 +235,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
   }, [reloadFromFirestore]);
 
-  // Attach real-time Firestore listeners once auth state is settled (supports Public Read + Admin Read/Write)
+  // Smart Cache + Delta Sync on startup; optional real-time listeners only when liveSyncEnabled is true
   useEffect(() => {
     if (!isAuthReady) return;
 
@@ -269,41 +295,43 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           if (cancelled) return;
         }
 
-        unsubFirestore = subscribeToFirestoreCollections(
-          listenerUser,
-          (partial) => {
-            if (cancelled) return;
-            setFirestoreReadError(null);
-            if (partial.dataset) {
-              setFirestoreDataset((prev) => ({
-                employees: partial.dataset?.employees ?? prev?.employees ?? [],
-                partners: partial.dataset?.partners ?? prev?.partners ?? [],
-                hybrids: partial.dataset?.hybrids ?? prev?.hybrids ?? [],
-                lots: partial.dataset?.lots ?? prev?.lots ?? [],
-                dr_shipments: partial.dataset?.dr_shipments ?? prev?.dr_shipments ?? [],
-                opname_logs: partial.dataset?.opname_logs ?? prev?.opname_logs ?? [],
-              }));
-            }
-            if (partial.accessRules && Object.keys(partial.accessRules).length > 0) {
-              setFirestoreAccessRules(partial.accessRules);
-            }
-          },
-          (err) => {
-            if (cancelled) return;
-            const errText = String((err as any)?.message || err || "");
-            const isPermDenied =
-              errText.toLowerCase().includes("permission") ||
-              errText.toLowerCase().includes("insufficient");
-            setFirestoreReadError(
-              isPermDenied
-                ? `Akses baca & edit tanpa login belum aktif di Firestore Rules (${ACTIVE_DB_LABEL}). Salin & publikasikan firestore.rules terbaru di Firebase Console.`
-                : "Sinkronisasi real-time Firestore terganggu.",
-            );
-            setFirestoreDataset((prev) => prev || EMPTY_DATASET);
-          },
-        );
+        if (liveSyncEnabled) {
+          unsubFirestore = subscribeToFirestoreCollections(
+            listenerUser,
+            (partial) => {
+              if (cancelled) return;
+              setFirestoreReadError(null);
+              if (partial.dataset) {
+                setFirestoreDataset((prev) => ({
+                  employees: partial.dataset?.employees ?? prev?.employees ?? [],
+                  partners: partial.dataset?.partners ?? prev?.partners ?? [],
+                  hybrids: partial.dataset?.hybrids ?? prev?.hybrids ?? [],
+                  lots: partial.dataset?.lots ?? prev?.lots ?? [],
+                  dr_shipments: partial.dataset?.dr_shipments ?? prev?.dr_shipments ?? [],
+                  opname_logs: partial.dataset?.opname_logs ?? prev?.opname_logs ?? [],
+                }));
+              }
+              if (partial.accessRules && Object.keys(partial.accessRules).length > 0) {
+                setFirestoreAccessRules(partial.accessRules);
+              }
+            },
+            (err) => {
+              if (cancelled) return;
+              const errText = String((err as any)?.message || err || "");
+              const isPermDenied =
+                errText.toLowerCase().includes("permission") ||
+                errText.toLowerCase().includes("insufficient");
+              setFirestoreReadError(
+                isPermDenied
+                  ? `Akses baca & edit tanpa login belum aktif di Firestore Rules (${ACTIVE_DB_LABEL}). Salin & publikasikan firestore.rules terbaru di Firebase Console.`
+                  : "Sinkronisasi real-time Firestore terganggu.",
+              );
+              setFirestoreDataset((prev) => prev || EMPTY_DATASET);
+            },
+          );
+        }
       } catch (err) {
-        console.error("Failed to initialize Firestore listeners:", err);
+        console.error("Failed to initialize Firestore data:", err);
       }
     })();
 
@@ -311,7 +339,15 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       cancelled = true;
       if (unsubFirestore) unsubFirestore();
     };
-  }, [isAuthReady, isAuthorizedFirebase, firebaseUser, listenerRetryTick, reloadFromFirestore, syncFromSourceToFirestore]);
+  }, [
+    isAuthReady,
+    isAuthorizedFirebase,
+    firebaseUser,
+    liveSyncEnabled,
+    listenerRetryTick,
+    reloadFromFirestore,
+    syncFromSourceToFirestore,
+  ]);
 
   const retryFirestoreSync = useCallback(() => {
     setListenerRetryTick((t) => t + 1);
@@ -361,11 +397,15 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         isLoadingFirestore,
         isMigrating,
         migrationStage,
+        syncMode,
+        liveSyncEnabled,
+        setLiveSyncEnabled,
         connectGoogle,
         disconnectGoogle,
         migrateDatasetToFirestore,
         syncFromSourceToFirestore,
         reloadFromFirestore,
+        removeLocalFirestoreDocs,
         retryFirestoreSync,
       }}
     >

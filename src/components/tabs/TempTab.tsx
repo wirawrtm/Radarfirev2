@@ -207,6 +207,8 @@ export const TempTab: React.FC<TempTabProps> = ({
   const [opnameMetricView, setOpnameMetricView] = useState<"combined" | "in" | "idle" | "pog">(
     "combined",
   );
+  const [currentPage, setCurrentPage] = useState<number>(1);
+  const [pageSize, setPageSize] = useState<number>(50);
   const {
     firebaseUser,
     firestoreDataset,
@@ -215,11 +217,15 @@ export const TempTab: React.FC<TempTabProps> = ({
     isLoadingFirestore,
     isMigrating,
     migrationStage,
+    syncMode,
+    liveSyncEnabled,
+    setLiveSyncEnabled,
     connectGoogle,
     disconnectGoogle,
     migrateDatasetToFirestore,
     syncFromSourceToFirestore,
     reloadFromFirestore,
+    removeLocalFirestoreDocs,
   } = useFirebase();
 
   const [uploadedDrRows, setUploadedDrRows] = useState<any[]>([]);
@@ -1377,6 +1383,11 @@ export const TempTab: React.FC<TempTabProps> = ({
     [scopedPartnersBase],
   );
 
+  const lotById = useMemo(
+    () => new Map(lotsCol.map((l) => [l.doc_id, l])),
+    [lotsCol],
+  );
+
   const scopedLogsBase = useMemo(() => {
     const base = opnameLogsCol.filter((l) => {
       if (activeLoginEmp) {
@@ -1394,7 +1405,7 @@ export const TempTab: React.FC<TempTabProps> = ({
           return cDiv === effectiveDivision;
         }
       }
-      const lotObj = lotsCol.find((x) => x.doc_id === l.lot_no);
+      const lotObj = lotById.get(l.lot_no);
       const lotDiv = lotObj?.hybrid_id ? hybridDivMap.get(lotObj.hybrid_id) : undefined;
       if (lotDiv === "Field Corn" || lotDiv === "Vegetables") {
         return lotDiv === effectiveDivision;
@@ -1411,7 +1422,7 @@ export const TempTab: React.FC<TempTabProps> = ({
     activeLoginEmp,
     allowedEmpSet,
     allowedPartnerSet,
-    lotsCol,
+    lotById,
     hybridDivMap,
     partnerDivMap,
     empDivMap,
@@ -1428,7 +1439,7 @@ export const TempTab: React.FC<TempTabProps> = ({
       if (d.partner_id && partnerDivMap.has(d.partner_id)) {
         return partnerDivMap.get(d.partner_id) === effectiveDivision;
       }
-      const lotObj = lotsCol.find((x) => x.doc_id === d.lot_no);
+      const lotObj = lotById.get(d.lot_no);
       const lotDiv = lotObj?.hybrid_id ? hybridDivMap.get(lotObj.hybrid_id) : undefined;
       if (lotDiv === "Field Corn" || lotDiv === "Vegetables") {
         return lotDiv === effectiveDivision;
@@ -1443,7 +1454,7 @@ export const TempTab: React.FC<TempTabProps> = ({
     drShipmentsCol,
     activeLoginEmp,
     allowedPartnerSet,
-    lotsCol,
+    lotById,
     hybridDivMap,
     partnerDivMap,
     effectiveDivision,
@@ -1525,6 +1536,69 @@ export const TempTab: React.FC<TempTabProps> = ({
   const filteredEmployees = useMemo(
     () => filterAndSortDocs(scopedEmployeesBase, "employees"),
     [scopedEmployeesBase, filterAndSortDocs],
+  );
+
+  const activeTotalRows = useMemo(() => {
+    if (activeCollection === "opname_logs") return filteredLogs.length;
+    if (activeCollection === "dr_shipments") return filteredDr.length;
+    if (activeCollection === "lots") return filteredLots.length;
+    if (activeCollection === "hybrids") return filteredHybrids.length;
+    if (activeCollection === "partners") return filteredPartners.length;
+    return filteredEmployees.length;
+  }, [
+    activeCollection,
+    filteredLogs.length,
+    filteredDr.length,
+    filteredLots.length,
+    filteredHybrids.length,
+    filteredPartners.length,
+    filteredEmployees.length,
+  ]);
+
+  const totalPages = Math.max(1, Math.ceil(activeTotalRows / pageSize));
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [
+    activeCollection,
+    effectiveDivision,
+    simulatedLoginEmpId,
+    tempSearchQuery,
+    colFilters,
+    colUniqueFilters,
+    sortConfig,
+    pageSize,
+  ]);
+
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+  }, [currentPage, totalPages]);
+
+  const paginatedLogs = useMemo(
+    () => filteredLogs.slice((currentPage - 1) * pageSize, currentPage * pageSize),
+    [filteredLogs, currentPage, pageSize],
+  );
+  const paginatedDr = useMemo(
+    () => filteredDr.slice((currentPage - 1) * pageSize, currentPage * pageSize),
+    [filteredDr, currentPage, pageSize],
+  );
+  const paginatedLots = useMemo(
+    () => filteredLots.slice((currentPage - 1) * pageSize, currentPage * pageSize),
+    [filteredLots, currentPage, pageSize],
+  );
+  const paginatedHybrids = useMemo(
+    () => filteredHybrids.slice((currentPage - 1) * pageSize, currentPage * pageSize),
+    [filteredHybrids, currentPage, pageSize],
+  );
+  const paginatedPartners = useMemo(
+    () => filteredPartners.slice((currentPage - 1) * pageSize, currentPage * pageSize),
+    [filteredPartners, currentPage, pageSize],
+  );
+  const paginatedEmployees = useMemo(
+    () => filteredEmployees.slice((currentPage - 1) * pageSize, currentPage * pageSize),
+    [filteredEmployees, currentPage, pageSize],
   );
 
   const headerModalUniqueEntries = useMemo(() => {
@@ -1705,6 +1779,7 @@ export const TempTab: React.FC<TempTabProps> = ({
         drSalesRows: drSalesData || [],
       });
       const res = await saveUploadedDrToFirestore(firebaseUser, parsed, snapshot);
+      await reloadFromFirestore();
       setDrUploadStats({
         total: parsed.length,
         matchedExisting: matchedExisting,
@@ -2225,6 +2300,7 @@ export const TempTab: React.FC<TempTabProps> = ({
         }
       }
 
+      await reloadFromFirestore();
       setInlineDrafts((prev) => ({ ...prev, [activeCollection]: [] }));
       showToast(`${savedCount} baris baru berhasil disimpan ke Firestore (${activeCollection}).`);
     } catch (err: any) {
@@ -2240,6 +2316,7 @@ export const TempTab: React.FC<TempTabProps> = ({
     effectiveDivision,
     resolvePartnerByName,
     resolveEmployeeByName,
+    reloadFromFirestore,
     showToast,
   ]);
 
@@ -3030,6 +3107,7 @@ export const TempTab: React.FC<TempTabProps> = ({
           }
         }
 
+        await reloadFromFirestore();
         setInlineEdits((prev) => {
           const nextCol = { ...prev[colKey] };
           keys.forEach((k) => delete nextCol[k]);
@@ -3053,6 +3131,7 @@ export const TempTab: React.FC<TempTabProps> = ({
       effectiveDivision,
       resolvePartnerByName,
       resolveEmployeeByName,
+      reloadFromFirestore,
       showToast,
     ],
   );
@@ -3096,6 +3175,7 @@ export const TempTab: React.FC<TempTabProps> = ({
     setEditError(null);
     try {
       const deletedCount = await bulkDeleteCollectionDocsFirestore(colKey, docIds, firebaseUser);
+      removeLocalFirestoreDocs(colKey, docIds);
       setSelectedRowIds((prev) => ({
         ...prev,
         [colKey]: prev[colKey].filter((id) => !docIds.includes(id)),
@@ -3113,7 +3193,7 @@ export const TempTab: React.FC<TempTabProps> = ({
     } finally {
       setIsDeletingRows(false);
     }
-  }, [deleteConfirm, firebaseUser, showToast]);
+  }, [deleteConfirm, firebaseUser, removeLocalFirestoreDocs, showToast]);
 
   const activeEditsMap = inlineEdits[activeCollection] || {};
   const activeEditCount = Object.keys(activeEditsMap).length;
@@ -3261,19 +3341,23 @@ export const TempTab: React.FC<TempTabProps> = ({
             <div className="flex flex-wrap items-center gap-2">
               <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-700 text-[11px] font-bold">
                 <span className="material-symbols-outlined text-[15px]">cloud_done</span>
-                Firestore Live Sync
+                {liveSyncEnabled
+                  ? "Realtime Live Sync"
+                  : syncMode === "delta"
+                    ? "Smart Cache + Delta Sync"
+                    : "Firestore Cache Sync"}
               </span>
               <span className="text-[11px] font-semibold text-[#434655]">
-                Akses Terbuka Tanpa Login
+                Hemat Kuota 200+ User
               </span>
             </div>
             <p className="text-xs text-[#434655] leading-relaxed break-words">
               {isMigrating && migrationStage
                 ? migrationStage
                 : isLoadingFirestore
-                  ? "Menarik data real-time dari Firestore..."
+                  ? "Menarik pembaruan data dari Firestore..."
                   : hasFirestoreData
-                    ? `Terhubung ke Firebase Firestore (${firebaseConfig.firestoreDatabaseId || firebaseConfig.projectId}) · Baca & edit aktif untuk semua pengunjung.`
+                    ? `Terhubung ke Firebase Firestore (${firebaseConfig.firestoreDatabaseId || firebaseConfig.projectId}) · ID anti-bentrok & cache lokal aktif.`
                     : `Terhubung ke Firebase Firestore (${firebaseConfig.firestoreDatabaseId || firebaseConfig.projectId}) · Database kosong (0 dokumen). Siap menerima input atau tarik dari Google Sheets.`}
             </p>
           </div>
@@ -3300,8 +3384,8 @@ export const TempTab: React.FC<TempTabProps> = ({
               disabled={isLoadingFirestore || isMigrating}
               onClick={async () => {
                 try {
-                  await reloadFromFirestore();
-                  showToast("Data terbaru berhasil ditarik dari Firebase Firestore.");
+                  await reloadFromFirestore({ forceFull: true });
+                  showToast("Data penuh terbaru berhasil ditarik dari Firebase Firestore.");
                 } catch (err: any) {
                   showToast(err?.message || "Gagal memuat ulang data dari Firestore.");
                 }
@@ -3309,7 +3393,22 @@ export const TempTab: React.FC<TempTabProps> = ({
               className="h-9 px-3.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer shadow-sm disabled:opacity-50"
             >
               <span className="material-symbols-outlined text-[16px]">sync</span>
-              {isLoadingFirestore ? "Memuat..." : "Muat Ulang Firestore"}
+              {isLoadingFirestore ? "Memuat..." : "Muat Ulang Penuh"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setLiveSyncEnabled((v) => !v)}
+              className={`h-9 px-3 rounded-xl border text-xs font-bold inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer ${
+                liveSyncEnabled
+                  ? "bg-amber-50 border-amber-300 text-amber-800"
+                  : "bg-white border-[#e0e0fa] hover:bg-[#f4f2ff] text-[#434655]"
+              }`}
+              title="Aktifkan/matikan listener real-time (mode default Delta Sync lebih hemat kuota untuk 200 user)"
+            >
+              <span className="material-symbols-outlined text-[15px]">
+                {liveSyncEnabled ? "sensors" : "offline_bolt"}
+              </span>
+              {liveSyncEnabled ? "Live: ON" : "Delta Mode"}
             </button>
             <button
               type="button"
@@ -3869,17 +3968,17 @@ export const TempTab: React.FC<TempTabProps> = ({
                         <input
                           type="checkbox"
                           checked={
-                            filteredLogs.length > 0 &&
-                            filteredLogs.every((r) => selectedRowIds.opname_logs.includes(r.doc_id || r._key))
+                            paginatedLogs.length > 0 &&
+                            paginatedLogs.every((r) => selectedRowIds.opname_logs.includes(r.doc_id || r._key))
                           }
                           onChange={() =>
                             handleToggleSelectAllVisible(
                               "opname_logs",
-                              filteredLogs.map((r) => r.doc_id || r._key),
+                              paginatedLogs.map((r) => r.doc_id || r._key),
                             )
                           }
                           className="cursor-pointer accent-[#154be2]"
-                          title="Pilih semua baris terlihat"
+                          title="Pilih semua baris di halaman ini"
                         />
                       </th>
                       {renderHeaderCell("opname_logs", "partner_name", "partner_name")}
@@ -4050,7 +4149,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                         </td>
                       </tr>
                     ))}
-                    {filteredLogs.map((l, rowIdx) => {
+                    {paginatedLogs.map((l, rowIdx) => {
                       const rowId = l.doc_id || l._key;
                       const editRow = inlineEdits.opname_logs[rowId];
                       const isChecked = selectedRowIds.opname_logs.includes(rowId);
@@ -4072,7 +4171,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                                 list="inline-partners-list"
                                 value={editRow.partner_name || ""}
                                 onPaste={(e) =>
-                                  handlePasteEditCells("opname_logs", filteredLogs, rowIdx, "partner_name", e)
+                                  handlePasteEditCells("opname_logs", paginatedLogs, rowIdx, "partner_name", e)
                                 }
                                 onChange={(e) => {
                                   const val = e.target.value;
@@ -4095,7 +4194,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                                 list="inline-lots-list"
                                 value={editRow.lot_no}
                                 onPaste={(e) =>
-                                  handlePasteEditCells("opname_logs", filteredLogs, rowIdx, "lot_no", e)
+                                  handlePasteEditCells("opname_logs", paginatedLogs, rowIdx, "lot_no", e)
                                 }
                                 onChange={(e) =>
                                   handleUpdateEditField("opname_logs", rowId, {
@@ -4110,7 +4209,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                                 type="text"
                                 value={editRow.sku || ""}
                                 onPaste={(e) =>
-                                  handlePasteEditCells("opname_logs", filteredLogs, rowIdx, "sku", e)
+                                  handlePasteEditCells("opname_logs", paginatedLogs, rowIdx, "sku", e)
                                 }
                                 onChange={(e) =>
                                   handleUpdateEditField("opname_logs", rowId, {
@@ -4127,7 +4226,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                                 list="inline-employees-list"
                                 value={editRow.checker_name || ""}
                                 onPaste={(e) =>
-                                  handlePasteEditCells("opname_logs", filteredLogs, rowIdx, "checker_name", e)
+                                  handlePasteEditCells("opname_logs", paginatedLogs, rowIdx, "checker_name", e)
                                 }
                                 onChange={(e) => {
                                   const val = e.target.value;
@@ -4149,7 +4248,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                                 type="text"
                                 value={editRow.crop_year}
                                 onPaste={(e) =>
-                                  handlePasteEditCells("opname_logs", filteredLogs, rowIdx, "crop_year", e)
+                                  handlePasteEditCells("opname_logs", paginatedLogs, rowIdx, "crop_year", e)
                                 }
                                 onChange={(e) =>
                                   handleUpdateEditField("opname_logs", rowId, {
@@ -4171,7 +4270,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                                       placeholder="in"
                                       value={cell.in}
                                       onPaste={(e) =>
-                                        handlePasteEditCells("opname_logs", filteredLogs, rowIdx, `${key}.in`, e)
+                                        handlePasteEditCells("opname_logs", paginatedLogs, rowIdx, `${key}.in`, e)
                                       }
                                       onChange={(e) =>
                                         handleUpdateEditOpnameMonthCell(rowId, key, "in", e.target.value)
@@ -4185,7 +4284,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                                       placeholder="idl"
                                       value={cell.idle}
                                       onPaste={(e) =>
-                                        handlePasteEditCells("opname_logs", filteredLogs, rowIdx, `${key}.idle`, e)
+                                        handlePasteEditCells("opname_logs", paginatedLogs, rowIdx, `${key}.idle`, e)
                                       }
                                       onChange={(e) =>
                                         handleUpdateEditOpnameMonthCell(rowId, key, "idle", e.target.value)
@@ -4199,7 +4298,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                                       placeholder="pog"
                                       value={cell.pog}
                                       onPaste={(e) =>
-                                        handlePasteEditCells("opname_logs", filteredLogs, rowIdx, `${key}.pog`, e)
+                                        handlePasteEditCells("opname_logs", paginatedLogs, rowIdx, `${key}.pog`, e)
                                       }
                                       onChange={(e) =>
                                         handleUpdateEditOpnameMonthCell(rowId, key, "pog", e.target.value)
@@ -4407,13 +4506,13 @@ export const TempTab: React.FC<TempTabProps> = ({
                         <input
                           type="checkbox"
                           checked={
-                            filteredDr.length > 0 &&
-                            filteredDr.every((r) => selectedRowIds.dr_shipments.includes(r.doc_id))
+                            paginatedDr.length > 0 &&
+                            paginatedDr.every((r) => selectedRowIds.dr_shipments.includes(r.doc_id))
                           }
                           onChange={() =>
                             handleToggleSelectAllVisible(
                               "dr_shipments",
-                              filteredDr.map((r) => r.doc_id),
+                              paginatedDr.map((r) => r.doc_id),
                             )
                           }
                           className="cursor-pointer accent-[#154be2]"
@@ -4552,7 +4651,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                         </td>
                       </tr>
                     ))}
-                    {filteredDr.map((d, rowIdx) => {
+                    {paginatedDr.map((d, rowIdx) => {
                       const editRow = inlineEdits.dr_shipments[d.doc_id];
                       const isChecked = selectedRowIds.dr_shipments.includes(d.doc_id);
                       if (editRow) {
@@ -4572,7 +4671,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                                 type="date"
                                 value={editRow.shipping_date}
                                 onPaste={(e) =>
-                                  handlePasteEditCells("dr_shipments", filteredDr, rowIdx, "shipping_date", e)
+                                  handlePasteEditCells("dr_shipments", paginatedDr, rowIdx, "shipping_date", e)
                                 }
                                 onChange={(e) =>
                                   handleUpdateEditField("dr_shipments", d.doc_id, {
@@ -4588,7 +4687,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                                 list="inline-partners-list"
                                 value={editRow.partner_name || ""}
                                 onPaste={(e) =>
-                                  handlePasteEditCells("dr_shipments", filteredDr, rowIdx, "partner_name", e)
+                                  handlePasteEditCells("dr_shipments", paginatedDr, rowIdx, "partner_name", e)
                                 }
                                 onChange={(e) => {
                                   const val = e.target.value;
@@ -4611,7 +4710,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                                 list="inline-lots-list"
                                 value={editRow.lot_no}
                                 onPaste={(e) =>
-                                  handlePasteEditCells("dr_shipments", filteredDr, rowIdx, "lot_no", e)
+                                  handlePasteEditCells("dr_shipments", paginatedDr, rowIdx, "lot_no", e)
                                 }
                                 onChange={(e) =>
                                   handleUpdateEditField("dr_shipments", d.doc_id, {
@@ -4626,7 +4725,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                                 type="text"
                                 value={editRow.sku || ""}
                                 onPaste={(e) =>
-                                  handlePasteEditCells("dr_shipments", filteredDr, rowIdx, "sku", e)
+                                  handlePasteEditCells("dr_shipments", paginatedDr, rowIdx, "sku", e)
                                 }
                                 onChange={(e) =>
                                   handleUpdateEditField("dr_shipments", d.doc_id, {
@@ -4643,7 +4742,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                                 maxLength={8}
                                 value={editRow.exp_date}
                                 onPaste={(e) =>
-                                  handlePasteEditCells("dr_shipments", filteredDr, rowIdx, "exp_date", e)
+                                  handlePasteEditCells("dr_shipments", paginatedDr, rowIdx, "exp_date", e)
                                 }
                                 onChange={(e) =>
                                   handleUpdateEditField("dr_shipments", d.doc_id, {
@@ -4659,7 +4758,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                                 type="text"
                                 value={editRow.shipped_qty_kg}
                                 onPaste={(e) =>
-                                  handlePasteEditCells("dr_shipments", filteredDr, rowIdx, "shipped_qty_kg", e)
+                                  handlePasteEditCells("dr_shipments", paginatedDr, rowIdx, "shipped_qty_kg", e)
                                 }
                                 onChange={(e) =>
                                   handleUpdateEditField("dr_shipments", d.doc_id, {
@@ -4748,13 +4847,13 @@ export const TempTab: React.FC<TempTabProps> = ({
                       <input
                         type="checkbox"
                         checked={
-                          filteredLots.length > 0 &&
-                          filteredLots.every((r) => selectedRowIds.lots.includes(r.doc_id))
+                          paginatedLots.length > 0 &&
+                          paginatedLots.every((r) => selectedRowIds.lots.includes(r.doc_id))
                         }
                         onChange={() =>
                           handleToggleSelectAllVisible(
                             "lots",
-                            filteredLots.map((r) => r.doc_id),
+                            paginatedLots.map((r) => r.doc_id),
                           )
                         }
                         className="cursor-pointer accent-[#154be2]"
@@ -4884,7 +4983,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                       </td>
                     </tr>
                   ))}
-                  {filteredLots.map((l, rowIdx) => {
+                  {paginatedLots.map((l, rowIdx) => {
                     const editRow = inlineEdits.lots[l.doc_id];
                     const isChecked = selectedRowIds.lots.includes(l.doc_id);
                     if (editRow) {
@@ -4903,7 +5002,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                             <select
                               value={editRow.hybrid_id}
                               onPaste={(e) =>
-                                handlePasteEditCells("lots", filteredLots, rowIdx, "hybrid_id", e, true)
+                                handlePasteEditCells("lots", paginatedLots, rowIdx, "hybrid_id", e, true)
                               }
                               onChange={(e) =>
                                 handleUpdateEditField("lots", l.doc_id, {
@@ -4925,7 +5024,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                               type="text"
                               value={editRow.sku || ""}
                               onPaste={(e) =>
-                                handlePasteEditCells("lots", filteredLots, rowIdx, "sku", e)
+                                handlePasteEditCells("lots", paginatedLots, rowIdx, "sku", e)
                               }
                               onChange={(e) =>
                                 handleUpdateEditField("lots", l.doc_id, {
@@ -4942,7 +5041,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                               maxLength={8}
                               value={formatToDDMMYYYY(editRow.shipping_date)}
                               onPaste={(e) =>
-                                handlePasteEditCells("lots", filteredLots, rowIdx, "shipping_date", e)
+                                handlePasteEditCells("lots", paginatedLots, rowIdx, "shipping_date", e)
                               }
                               onChange={(e) =>
                                 handleUpdateEditField("lots", l.doc_id, {
@@ -4958,7 +5057,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                               type="text"
                               value={editRow.exp_date}
                               onPaste={(e) =>
-                                handlePasteEditCells("lots", filteredLots, rowIdx, "exp_date", e)
+                                handlePasteEditCells("lots", paginatedLots, rowIdx, "exp_date", e)
                               }
                               onChange={(e) =>
                                 handleUpdateEditField("lots", l.doc_id, {
@@ -4974,7 +5073,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                               type="text"
                               value={editRow.initial_dr_kg}
                               onPaste={(e) =>
-                                handlePasteEditCells("lots", filteredLots, rowIdx, "initial_dr_kg", e)
+                                handlePasteEditCells("lots", paginatedLots, rowIdx, "initial_dr_kg", e)
                               }
                               onChange={(e) =>
                                 handleUpdateEditField("lots", l.doc_id, {
@@ -5058,13 +5157,13 @@ export const TempTab: React.FC<TempTabProps> = ({
                       <input
                         type="checkbox"
                         checked={
-                          filteredHybrids.length > 0 &&
-                          filteredHybrids.every((r) => selectedRowIds.hybrids.includes(r.doc_id))
+                          paginatedHybrids.length > 0 &&
+                          paginatedHybrids.every((r) => selectedRowIds.hybrids.includes(r.doc_id))
                         }
                         onChange={() =>
                           handleToggleSelectAllVisible(
                             "hybrids",
-                            filteredHybrids.map((r) => r.doc_id),
+                            paginatedHybrids.map((r) => r.doc_id),
                           )
                         }
                         className="cursor-pointer accent-[#154be2]"
@@ -5150,7 +5249,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                       </td>
                     </tr>
                   ))}
-                  {filteredHybrids.map((h, rowIdx) => {
+                  {paginatedHybrids.map((h, rowIdx) => {
                     const editRow = inlineEdits.hybrids[h.doc_id];
                     const isChecked = selectedRowIds.hybrids.includes(h.doc_id);
                     if (editRow) {
@@ -5170,7 +5269,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                               type="text"
                               value={editRow.hybrid_name}
                               onPaste={(e) =>
-                                handlePasteEditCells("hybrids", filteredHybrids, rowIdx, "hybrid_name", e)
+                                handlePasteEditCells("hybrids", paginatedHybrids, rowIdx, "hybrid_name", e)
                               }
                               onChange={(e) =>
                                 handleUpdateEditField("hybrids", h.doc_id, {
@@ -5185,7 +5284,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                               type="text"
                               value={editRow.sku || ""}
                               onPaste={(e) =>
-                                handlePasteEditCells("hybrids", filteredHybrids, rowIdx, "sku", e)
+                                handlePasteEditCells("hybrids", paginatedHybrids, rowIdx, "sku", e)
                               }
                               onChange={(e) =>
                                 handleUpdateEditField("hybrids", h.doc_id, {
@@ -5200,7 +5299,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                             <select
                               value={editRow.crop_type}
                               onPaste={(e) =>
-                                handlePasteEditCells("hybrids", filteredHybrids, rowIdx, "crop_type", e, true)
+                                handlePasteEditCells("hybrids", paginatedHybrids, rowIdx, "crop_type", e, true)
                               }
                               onChange={(e) =>
                                 handleUpdateEditField("hybrids", h.doc_id, {
@@ -5288,13 +5387,13 @@ export const TempTab: React.FC<TempTabProps> = ({
                       <input
                         type="checkbox"
                         checked={
-                          filteredPartners.length > 0 &&
-                          filteredPartners.every((r) => selectedRowIds.partners.includes(r.doc_id))
+                          paginatedPartners.length > 0 &&
+                          paginatedPartners.every((r) => selectedRowIds.partners.includes(r.doc_id))
                         }
                         onChange={() =>
                           handleToggleSelectAllVisible(
                             "partners",
-                            filteredPartners.map((r) => r.doc_id),
+                            paginatedPartners.map((r) => r.doc_id),
                           )
                         }
                         className="cursor-pointer accent-[#154be2]"
@@ -5434,7 +5533,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                       </td>
                     </tr>
                   ))}
-                  {filteredPartners.map((p, rowIdx) => {
+                  {paginatedPartners.map((p, rowIdx) => {
                     const editRow = inlineEdits.partners[p.doc_id];
                     const isChecked = selectedRowIds.partners.includes(p.doc_id);
                     if (editRow) {
@@ -5454,7 +5553,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                               type="text"
                               value={editRow.partner_name}
                               onPaste={(e) =>
-                                handlePasteEditCells("partners", filteredPartners, rowIdx, "partner_name", e)
+                                handlePasteEditCells("partners", paginatedPartners, rowIdx, "partner_name", e)
                               }
                               onChange={(e) =>
                                 handleUpdateEditField("partners", p.doc_id, {
@@ -5470,7 +5569,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                               list="inline-categories-list"
                               value={editRow.category}
                               onPaste={(e) =>
-                                handlePasteEditCells("partners", filteredPartners, rowIdx, "category", e)
+                                handlePasteEditCells("partners", paginatedPartners, rowIdx, "category", e)
                               }
                               onChange={(e) =>
                                 handleUpdateEditField("partners", p.doc_id, {
@@ -5487,7 +5586,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                               list="inline-employees-list"
                               value={editRow.pic_employee_name || ""}
                               onPaste={(e) =>
-                                handlePasteEditCells("partners", filteredPartners, rowIdx, "pic_employee_name", e)
+                                handlePasteEditCells("partners", paginatedPartners, rowIdx, "pic_employee_name", e)
                               }
                               onChange={(e) => {
                                 const val = e.target.value;
@@ -5510,7 +5609,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                               list="inline-divisions-list"
                               value={editRow.division_group}
                               onPaste={(e) =>
-                                handlePasteEditCells("partners", filteredPartners, rowIdx, "division_group", e)
+                                handlePasteEditCells("partners", paginatedPartners, rowIdx, "division_group", e)
                               }
                               onChange={(e) =>
                                 handleUpdateEditField("partners", p.doc_id, {
@@ -5527,7 +5626,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                               list="inline-prov-list"
                               value={editRow.province}
                               onPaste={(e) =>
-                                handlePasteEditCells("partners", filteredPartners, rowIdx, "province", e)
+                                handlePasteEditCells("partners", paginatedPartners, rowIdx, "province", e)
                               }
                               onChange={(e) =>
                                 handleUpdateEditField("partners", p.doc_id, {
@@ -5542,7 +5641,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                               type="text"
                               value={editRow.area}
                               onPaste={(e) =>
-                                handlePasteEditCells("partners", filteredPartners, rowIdx, "area", e)
+                                handlePasteEditCells("partners", paginatedPartners, rowIdx, "area", e)
                               }
                               onChange={(e) =>
                                 handleUpdateEditField("partners", p.doc_id, {
@@ -5632,13 +5731,13 @@ export const TempTab: React.FC<TempTabProps> = ({
                       <input
                         type="checkbox"
                         checked={
-                          filteredEmployees.length > 0 &&
-                          filteredEmployees.every((r) => selectedRowIds.employees.includes(r.doc_id))
+                          paginatedEmployees.length > 0 &&
+                          paginatedEmployees.every((r) => selectedRowIds.employees.includes(r.doc_id))
                         }
                         onChange={() =>
                           handleToggleSelectAllVisible(
                             "employees",
-                            filteredEmployees.map((r) => r.doc_id),
+                            paginatedEmployees.map((r) => r.doc_id),
                           )
                         }
                         className="cursor-pointer accent-[#154be2]"
@@ -5816,7 +5915,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                       </td>
                     </tr>
                   ))}
-                  {filteredEmployees.map((e, rowIdx) => {
+                  {paginatedEmployees.map((e, rowIdx) => {
                     const editRow = inlineEdits.employees[e.doc_id];
                     const isChecked = selectedRowIds.employees.includes(e.doc_id);
                     if (editRow) {
@@ -5836,7 +5935,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                               type="text"
                               value={editRow.username}
                               onPaste={(ev) =>
-                                handlePasteEditCells("employees", filteredEmployees, rowIdx, "username", ev)
+                                handlePasteEditCells("employees", paginatedEmployees, rowIdx, "username", ev)
                               }
                               onChange={(ev) =>
                                 handleUpdateEditField("employees", e.doc_id, {
@@ -5851,7 +5950,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                               type="text"
                               value={editRow.password}
                               onPaste={(ev) =>
-                                handlePasteEditCells("employees", filteredEmployees, rowIdx, "password", ev)
+                                handlePasteEditCells("employees", paginatedEmployees, rowIdx, "password", ev)
                               }
                               onChange={(ev) =>
                                 handleUpdateEditField("employees", e.doc_id, {
@@ -5866,7 +5965,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                               type="text"
                               value={editRow.full_name}
                               onPaste={(ev) =>
-                                handlePasteEditCells("employees", filteredEmployees, rowIdx, "full_name", ev)
+                                handlePasteEditCells("employees", paginatedEmployees, rowIdx, "full_name", ev)
                               }
                               onChange={(ev) =>
                                 handleUpdateEditField("employees", e.doc_id, {
@@ -5880,7 +5979,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                             <select
                               value={editRow.position}
                               onPaste={(ev) =>
-                                handlePasteEditCells("employees", filteredEmployees, rowIdx, "position", ev, true)
+                                handlePasteEditCells("employees", paginatedEmployees, rowIdx, "position", ev, true)
                               }
                               onChange={(ev) =>
                                 handleUpdateEditField("employees", e.doc_id, {
@@ -5904,7 +6003,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                             <select
                               value={editRow.upline_id}
                               onPaste={(ev) =>
-                                handlePasteEditCells("employees", filteredEmployees, rowIdx, "upline_id", ev, true)
+                                handlePasteEditCells("employees", paginatedEmployees, rowIdx, "upline_id", ev, true)
                               }
                               onChange={(ev) =>
                                 handleUpdateEditField("employees", e.doc_id, {
@@ -5927,7 +6026,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                             <select
                               value={editRow.status}
                               onPaste={(ev) =>
-                                handlePasteEditCells("employees", filteredEmployees, rowIdx, "status", ev, true)
+                                handlePasteEditCells("employees", paginatedEmployees, rowIdx, "status", ev, true)
                               }
                               onChange={(ev) =>
                                 handleUpdateEditField("employees", e.doc_id, {
@@ -5944,7 +6043,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                             <select
                               value={editRow.division_group}
                               onPaste={(ev) =>
-                                handlePasteEditCells("employees", filteredEmployees, rowIdx, "division_group", ev, true)
+                                handlePasteEditCells("employees", paginatedEmployees, rowIdx, "division_group", ev, true)
                               }
                               onChange={(ev) =>
                                 handleUpdateEditField("employees", e.doc_id, {
@@ -5964,7 +6063,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                               list="inline-prov-list"
                               value={editRow.province}
                               onPaste={(ev) =>
-                                handlePasteEditCells("employees", filteredEmployees, rowIdx, "province", ev)
+                                handlePasteEditCells("employees", paginatedEmployees, rowIdx, "province", ev)
                               }
                               onChange={(ev) =>
                                 handleUpdateEditField("employees", e.doc_id, {
@@ -5979,7 +6078,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                               type="text"
                               value={editRow.area}
                               onPaste={(ev) =>
-                                handlePasteEditCells("employees", filteredEmployees, rowIdx, "area", ev)
+                                handlePasteEditCells("employees", paginatedEmployees, rowIdx, "area", ev)
                               }
                               onChange={(ev) =>
                                 handleUpdateEditField("employees", e.doc_id, {
@@ -6094,6 +6193,77 @@ export const TempTab: React.FC<TempTabProps> = ({
                 </tbody>
               </table>
             )}
+          </div>
+
+          {/* Pagination Control Bar */}
+          <div className="px-4 py-3 bg-[#fbf8ff] border-t border-[#e0e0fa] flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs">
+            <div className="flex flex-wrap items-center gap-2 text-[#434655] font-mono text-[11px]">
+              <span>
+                Menampilkan{" "}
+                <strong className="text-[#181a2c]">
+                  {activeTotalRows === 0 ? 0 : (currentPage - 1) * pageSize + 1}
+                </strong>
+                –
+                <strong className="text-[#181a2c]">
+                  {Math.min(currentPage * pageSize, activeTotalRows)}
+                </strong>{" "}
+                dari <strong className="text-[#181a2c]">{activeTotalRows.toLocaleString("id-ID")}</strong> baris
+              </span>
+              <span className="text-[#c0c2d4]">|</span>
+              <label className="inline-flex items-center gap-1.5">
+                <span>Per halaman:</span>
+                <select
+                  value={pageSize}
+                  onChange={(e) => setPageSize(Number(e.target.value) || 50)}
+                  className="h-7 px-2 rounded-lg bg-white border border-[#e0e0fa] font-mono text-[11px] font-bold text-[#181a2c] outline-none cursor-pointer"
+                >
+                  <option value={25}>25</option>
+                  <option value={50}>50</option>
+                  <option value={100}>100</option>
+                  <option value={250}>250</option>
+                </select>
+              </label>
+            </div>
+
+            <div className="flex items-center gap-1.5 font-mono text-[11px]">
+              <button
+                type="button"
+                disabled={currentPage <= 1}
+                onClick={() => setCurrentPage(1)}
+                className="h-7 px-2 rounded-lg bg-white border border-[#e0e0fa] hover:bg-[#f4f2ff] text-[#434655] font-semibold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                title="Halaman pertama"
+              >
+                «
+              </button>
+              <button
+                type="button"
+                disabled={currentPage <= 1}
+                onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                className="h-7 px-2.5 rounded-lg bg-white border border-[#e0e0fa] hover:bg-[#f4f2ff] text-[#181a2c] font-semibold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Prev
+              </button>
+              <span className="px-2.5 py-1 rounded-lg bg-[#f4f2ff] border border-[#e0e0fa] text-primary font-bold">
+                Hal {currentPage} / {totalPages}
+              </span>
+              <button
+                type="button"
+                disabled={currentPage >= totalPages}
+                onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                className="h-7 px-2.5 rounded-lg bg-white border border-[#e0e0fa] hover:bg-[#f4f2ff] text-[#181a2c] font-semibold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Next
+              </button>
+              <button
+                type="button"
+                disabled={currentPage >= totalPages}
+                onClick={() => setCurrentPage(totalPages)}
+                className="h-7 px-2 rounded-lg bg-white border border-[#e0e0fa] hover:bg-[#f4f2ff] text-[#434655] font-semibold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                title="Halaman terakhir"
+              >
+                »
+              </button>
+            </div>
           </div>
         </div>
       )}
