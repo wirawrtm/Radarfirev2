@@ -10,7 +10,7 @@ import {
   getFirestore,
   initializeFirestore,
   persistentLocalCache,
-  persistentMultipleTabManager,
+  persistentSingleTabManager,
   doc,
   getDocFromServer,
   type Firestore,
@@ -26,7 +26,7 @@ function createFirestoreClient(): Firestore {
       app,
       {
         localCache: persistentLocalCache({
-          tabManager: persistentMultipleTabManager(),
+          tabManager: persistentSingleTabManager({ forceOwnership: true }),
         }),
       },
       firestoreDatabaseId,
@@ -102,12 +102,25 @@ export function handleFirestoreError(
 }
 
 export async function testConnection(): Promise<boolean> {
+  if (typeof navigator !== "undefined" && navigator.onLine === false) {
+    return false;
+  }
   try {
-    await getDocFromServer(doc(db, "test", "connection"));
+    await Promise.race([
+      getDocFromServer(doc(db, "test", "connection")),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("the client is offline (timeout)")), 3500),
+      ),
+    ]);
     return true;
   } catch (error) {
-    if (error instanceof Error && error.message.includes("the client is offline")) {
-      console.error("Please check your Firebase configuration.");
+    const msg = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+    if (
+      msg.includes("the client is offline") ||
+      msg.includes("timeout") ||
+      msg.includes("unavailable") ||
+      msg.includes("network")
+    ) {
       return false;
     }
     // Permission denied on /test/connection still confirms Firestore backend is reachable

@@ -6,6 +6,7 @@ import {
   getDocs,
   getDocsFromCache,
   increment,
+  limit,
   onSnapshot,
   query,
   serverTimestamp,
@@ -49,7 +50,7 @@ export interface FirestoreAllData {
   syncMode?: "full" | "delta" | "cache";
 }
 
-const LAST_SYNC_STORAGE_KEY = "radar_fs_last_sync_v1";
+export const LAST_SYNC_STORAGE_KEY = "radar_fs_last_sync_v1";
 
 /**
  * Generates collision-free Firestore document IDs safe for 200+ concurrent users
@@ -334,6 +335,11 @@ function readLastSyncMs(): number {
   }
 }
 
+export function getLastSyncTimestampMs(): number | null {
+  const ms = readLastSyncMs();
+  return ms > 0 ? ms : null;
+}
+
 function writeLastSyncMs(ms: number): void {
   try {
     if (typeof localStorage !== "undefined") {
@@ -344,13 +350,119 @@ function writeLastSyncMs(ms: number): void {
   }
 }
 
+async function raceTimeout<T>(promise: Promise<T>, ms: number, msg: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(msg)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * Quota-safe check for newer updates on the server (max 2 reads per check).
+ * Should only be called sparingly (e.g., tab focus with >= 5 min cooldown).
+ */
+export async function checkHasRemoteUpdates(sinceMs: number): Promise<boolean> {
+  if (!sinceMs || sinceMs <= 0) return false;
+  if (typeof navigator !== "undefined" && !navigator.onLine) return false;
+
+  try {
+    const sinceTs = Timestamp.fromMillis(sinceMs + 2000);
+    const [opnameSnap, partnerSnap] = await raceTimeout(
+      Promise.all([
+        getDocs(query(collection(db, "opname_logs"), where("updatedAt", ">", sinceTs), limit(1))),
+        getDocs(query(collection(db, "partners"), where("updatedAt", ">", sinceTs), limit(1))),
+      ]),
+      4000,
+      "Timeout checking remote updates",
+    );
+    return !opnameSnap.empty || !partnerSnap.empty;
+  } catch {
+    return false;
+  }
+}
+
+export async function fetchAllFromCacheOnly(
+  user: User | null,
+): Promise<FirestoreAllData | null> {
+  const readCacheCol = async <T,>(colName: string): Promise<T[]> => {
+    try {
+      const snap = await getDocsFromCache(getScopedQuery(colName, user));
+      return snap.docs.map((d) => ({ doc_id: d.id, ...(d.data() as any) })) as T[];
+    } catch {
+      return [];
+    }
+  };
+
+  const [employees, partners, rawHybrids, rawLots, rawDrShipments, rawOpnameLogs, accessDocs] =
+    await Promise.all([
+      readCacheCol<EmployeeFsDoc>("employees"),
+      readCacheCol<PartnerFsDoc>("partners"),
+      readCacheCol<HybridFsDoc>("hybrids"),
+      readCacheCol<LotFsDoc>("lots"),
+      readCacheCol<DrShipmentFsDoc>("dr_shipments"),
+      readCacheCol<OpnameLogFsDoc>("opname_logs"),
+      readCacheCol<any>("access_rules"),
+    ]);
+
+  const hasAny =
+    employees.length > 0 ||
+    partners.length > 0 ||
+    rawHybrids.length > 0 ||
+    rawLots.length > 0 ||
+    rawDrShipments.length > 0 ||
+    rawOpnameLogs.length > 0;
+
+  if (!hasAny) return null;
+
+  const accessRules = parseAccessAndSkuMetaDocs(accessDocs);
+  const hybrids = rawHybrids.map(unpackHybridDoc);
+  const lots = enrichLotsWithSku(rawLots);
+  const dr_shipments = enrichDrWithSku(rawDrShipments);
+  const opname_logs = enrichLogsWithSku(rawOpnameLogs);
+
+  return {
+    dataset: {
+      employees,
+      partners,
+      hybrids,
+      lots,
+      dr_shipments,
+      opname_logs,
+    },
+    accessRules,
+    syncMode: "cache",
+  };
+}
+
 export async function fetchAllFirestoreData(
   user: User | null,
   options?: { forceFull?: boolean },
 ): Promise<FirestoreAllData> {
+  const isBrowserOffline = typeof navigator !== "undefined" && !navigator.onLine;
+  if (isBrowserOffline) {
+    if (options?.forceFull) {
+      throw new Error(
+        "Perangkat sedang offline / tanpa sinyal. Gunakan Muat Ulang Penuh setelah sinyal kembali.",
+      );
+    }
+    const cachedOnly = await fetchAllFromCacheOnly(user);
+    if (cachedOnly) return cachedOnly;
+  }
+
   const fetchColFull = async <T,>(colName: string): Promise<T[]> => {
     try {
-      const snap = await getDocs(getScopedQuery(colName, user));
+      const snap = await raceTimeout(
+        getDocs(getScopedQuery(colName, user)),
+        15000,
+        `Koneksi lambat / timeout saat memuat ${colName}.`,
+      );
       return snap.docs.map((d) => ({ doc_id: d.id, ...(d.data() as any) })) as T[];
     } catch (err) {
       if (!user && isPermissionDeniedError(err)) {
@@ -359,6 +471,8 @@ export async function fetchAllFirestoreData(
       handleFirestoreError(err, OperationType.LIST, colName);
     }
   };
+
+  let usedCacheFallback = false;
 
   const fetchColCachePlusDelta = async <T extends { doc_id: string }>(
     colName: string,
@@ -375,10 +489,26 @@ export async function fetchAllFirestoreData(
         merged.set(d.id, { doc_id: d.id, ...(d.data() as any) } as T);
       });
 
-      const deltaSnap = await getDocs(query(colRef, where("updatedAt", ">", sinceTs)));
-      deltaSnap.docs.forEach((d) => {
-        merged.set(d.id, { doc_id: d.id, ...(d.data() as any) } as T);
-      });
+      try {
+        const deltaSnap = await raceTimeout(
+          getDocs(query(colRef, where("updatedAt", ">", sinceTs))),
+          6500,
+          `Delta query timeout (${colName})`,
+        );
+        deltaSnap.docs.forEach((d) => {
+          merged.set(d.id, { doc_id: d.id, ...(d.data() as any) } as T);
+        });
+      } catch (deltaErr) {
+        if (!user && isPermissionDeniedError(deltaErr)) {
+          throw deltaErr;
+        }
+        // Weak signal / offline fallback: keep local IndexedDB cache if available!
+        if (merged.size > 0 || cacheSnap.empty === false) {
+          usedCacheFallback = true;
+          return Array.from(merged.values());
+        }
+        return null;
+      }
       return Array.from(merged.values());
     } catch (err) {
       if (!user && isPermissionDeniedError(err)) {
@@ -420,7 +550,9 @@ export async function fetchAllFirestoreData(
       deltaOpnameLogs !== null &&
       deltaAccessDocs !== null
     ) {
-      writeLastSyncMs(nowMs);
+      if (!usedCacheFallback) {
+        writeLastSyncMs(nowMs);
+      }
       const accessRules = parseAccessAndSkuMetaDocs(deltaAccessDocs);
       const hybrids = deltaHybrids.map(unpackHybridDoc);
       const lots = enrichLotsWithSku(deltaLots);
@@ -437,48 +569,56 @@ export async function fetchAllFirestoreData(
           opname_logs,
         },
         accessRules,
-        syncMode: "delta",
+        syncMode: usedCacheFallback ? "cache" : "delta",
       };
     }
   }
 
-  // Preflight a single collection in public mode so unpublished Console rules fail cleanly in 1 request without 7x error spam
-  let preflightAccessDocs: any[] | null = null;
-  if (!user) {
-    preflightAccessDocs = await fetchColFull<any>("access_rules");
+  try {
+    // Preflight a single collection in public mode so unpublished Console rules fail cleanly in 1 request without 7x error spam
+    let preflightAccessDocs: any[] | null = null;
+    if (!user) {
+      preflightAccessDocs = await fetchColFull<any>("access_rules");
+    }
+
+    const [employees, partners, rawHybrids, rawLots, rawDrShipments, rawOpnameLogs, accessDocs] =
+      await Promise.all([
+        fetchColFull<EmployeeFsDoc>("employees"),
+        fetchColFull<PartnerFsDoc>("partners"),
+        fetchColFull<HybridFsDoc>("hybrids"),
+        fetchColFull<LotFsDoc>("lots"),
+        fetchColFull<DrShipmentFsDoc>("dr_shipments"),
+        fetchColFull<OpnameLogFsDoc>("opname_logs"),
+        preflightAccessDocs !== null ? Promise.resolve(preflightAccessDocs) : fetchColFull<any>("access_rules"),
+      ]);
+
+    writeLastSyncMs(nowMs);
+
+    const accessRules = parseAccessAndSkuMetaDocs(accessDocs);
+    const hybrids = rawHybrids.map(unpackHybridDoc);
+    const lots = enrichLotsWithSku(rawLots);
+    const dr_shipments = enrichDrWithSku(rawDrShipments);
+    const opname_logs = enrichLogsWithSku(rawOpnameLogs);
+
+    return {
+      dataset: {
+        employees,
+        partners,
+        hybrids,
+        lots,
+        dr_shipments,
+        opname_logs,
+      },
+      accessRules,
+      syncMode: "full",
+    };
+  } catch (err) {
+    if (!options?.forceFull) {
+      const cachedOnly = await fetchAllFromCacheOnly(user);
+      if (cachedOnly) return cachedOnly;
+    }
+    throw err;
   }
-
-  const [employees, partners, rawHybrids, rawLots, rawDrShipments, rawOpnameLogs, accessDocs] =
-    await Promise.all([
-      fetchColFull<EmployeeFsDoc>("employees"),
-      fetchColFull<PartnerFsDoc>("partners"),
-      fetchColFull<HybridFsDoc>("hybrids"),
-      fetchColFull<LotFsDoc>("lots"),
-      fetchColFull<DrShipmentFsDoc>("dr_shipments"),
-      fetchColFull<OpnameLogFsDoc>("opname_logs"),
-      preflightAccessDocs !== null ? Promise.resolve(preflightAccessDocs) : fetchColFull<any>("access_rules"),
-    ]);
-
-  writeLastSyncMs(nowMs);
-
-  const accessRules = parseAccessAndSkuMetaDocs(accessDocs);
-  const hybrids = rawHybrids.map(unpackHybridDoc);
-  const lots = enrichLotsWithSku(rawLots);
-  const dr_shipments = enrichDrWithSku(rawDrShipments);
-  const opname_logs = enrichLogsWithSku(rawOpnameLogs);
-
-  return {
-    dataset: {
-      employees,
-      partners,
-      hybrids,
-      lots,
-      dr_shipments,
-      opname_logs,
-    },
-    accessRules,
-    syncMode: "full",
-  };
 }
 
 export function subscribeToFirestoreCollections(

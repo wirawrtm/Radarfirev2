@@ -54,6 +54,14 @@ import {
 } from "../services/firestoreDb";
 import firestoreRulesText from "../../firestore.rules?raw";
 import firebaseConfig from "../../firebase-applet-config.json";
+import {
+  clearHomeUnsavedDraftsForKiosk,
+  enqueueOfflineActivity,
+  isLikelyNetworkError,
+  loadHomeUnsavedDrafts,
+  saveHomeUnsavedDrafts,
+  withTimeout,
+} from "../utils/offlineQueue";
 
 const OverviewTab = lazy(() => import("./tabs/OverviewTab"));
 const HomeTab = lazy(() => import("./tabs/HomeTab"));
@@ -142,14 +150,23 @@ const Dashboard = ({
     firebaseUser,
     isAuthReady,
     isAuthorizedFirebase,
+    isOnline,
     firestoreReadError,
     firestoreDataset,
     firestoreAccessRules,
     isLoadingFirestore,
     isMigrating,
     migrationStage,
+    needsRefresh,
+    refreshReason,
+    pendingOfflineCount,
+    isSyncingOfflineQueue,
+    offlineSyncBanner,
+    clearOfflineSyncBanner,
     reloadFromFirestore,
     removeLocalFirestoreDocs,
+    applyLocalActivityPatch,
+    syncOfflineQueueNow,
     retryFirestoreSync,
   } = useFirebase();
   const [copiedBannerRules, setCopiedBannerRules] = useState(false);
@@ -189,10 +206,13 @@ const Dashboard = ({
   }, [employees]);
   const [loadProgress, setLoadProgress] = useState(0);
   const [showLoader, setShowLoader] = useState(true);
+  const hasCompletedInitialLoadRef = useRef(false);
 
   useEffect(() => {
     const isLoadingData =
-      isFetchingData || isChannelsLoading || isEmployeesLoading || isMigrating;
+      (!hasCompletedInitialLoadRef.current &&
+        (isFetchingData || isChannelsLoading || isEmployeesLoading)) ||
+      isMigrating;
     if (isLoadingData) {
       setShowLoader(true);
       setLoadProgress(0);
@@ -215,6 +235,7 @@ const Dashboard = ({
         clearInterval(interval);
       };
     } else {
+      hasCompletedInitialLoadRef.current = true;
       setLoadProgress(100);
       const timeout = setTimeout(() => {
         setShowLoader(false);
@@ -1431,7 +1452,33 @@ const Dashboard = ({
           };
         });
 
-      setWorkingData(enrichedData);
+      const savedDrafts = loadHomeUnsavedDrafts();
+      let finalWorking = enrichedData;
+      if (savedDrafts.length > 0) {
+        const draftByKey = new Map<string, any>();
+        savedDrafts.forEach((d) => {
+          const dk = `${cleanForMatch(d.kiosk)}_${cleanForMatch(d.lot)}_${cleanForMatch(d.hybrid)}`;
+          draftByKey.set(dk, d);
+        });
+        const mergedKeys = new Set<string>();
+        finalWorking = enrichedData.map((row) => {
+          const rk = `${cleanForMatch(row.kiosk)}_${cleanForMatch(row.lot)}_${cleanForMatch(row.hybrid)}`;
+          const draft = draftByKey.get(rk);
+          if (draft) {
+            mergedKeys.add(rk);
+            return { ...row, ...draft, id: row.id };
+          }
+          return row;
+        });
+        savedDrafts.forEach((d) => {
+          const dk = `${cleanForMatch(d.kiosk)}_${cleanForMatch(d.lot)}_${cleanForMatch(d.hybrid)}`;
+          if (!mergedKeys.has(dk)) {
+            finalWorking = [d, ...finalWorking];
+          }
+        });
+      }
+
+      setWorkingData(finalWorking);
       setDeletedItems([]);
     } catch (e) {
       console.warn("Error processing working data", e);
@@ -1561,6 +1608,12 @@ const Dashboard = ({
   }, [userData.name, teamMembers, mappingPic]);
 
   useEffect(() => {
+    if (!isFetchingData && workingData.length > 0) {
+      saveHomeUnsavedDrafts(workingData);
+    }
+  }, [workingData, isFetchingData]);
+
+  useEffect(() => {
     setIsLotNotFound(false);
     if (lotNo.length < 3) {
       setLotIntel(null);
@@ -1571,24 +1624,11 @@ const Dashboard = ({
       setManualExpDate("");
       return;
     }
+    let cancelled = false;
     const checkLot = async () => {
       setIsLotChecking(true);
-      try {
-        const resp = await customFetch(
-          `${SCRIPT_URL}?action=getLotInfo&lot=${encodeURIComponent(lotNo)}&kiosk=${encodeURIComponent(selectedKiosk)}`,
-        );
-        const res = await resp.json();
-        if (res.status === "success" && res.data) {
-          setLotIntel(res.data);
-          setIsLotNotFound(false);
-          setIsLotChecking(false);
-          return;
-        }
-      } catch (e) {
-        // Fallback to local
-      }
 
-      // Local fallback: search working sheet first
+      // 1. Instant Local-First Lookup (works 0ms even offline / dead-zone signal!)
       const cleanTarget = lotNo.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
       const cleanKiosk = cleanForMatch(selectedKiosk);
 
@@ -1602,28 +1642,33 @@ const Dashboard = ({
           )
         : null;
 
-      const foundInWorkingAny = foundInWorkingForKiosk || (Array.isArray(rawWorkingData)
-        ? rawWorkingData.find(
-            (w) =>
-              w.lot &&
-              (String(w.lot).trim().toUpperCase() === lotNo.trim().toUpperCase() ||
-                String(w.lot).toUpperCase().replace(/[^A-Z0-9]/g, "") === cleanTarget),
-          )
-        : null);
+      const foundInWorkingAny =
+        foundInWorkingForKiosk ||
+        (Array.isArray(rawWorkingData)
+          ? rawWorkingData.find(
+              (w) =>
+                w.lot &&
+                (String(w.lot).trim().toUpperCase() === lotNo.trim().toUpperCase() ||
+                  String(w.lot).toUpperCase().replace(/[^A-Z0-9]/g, "") === cleanTarget),
+            )
+          : null);
 
       if (foundInWorkingAny) {
         const rawWExp = foundInWorkingAny.expired || foundInWorkingAny.expDate || "N/A";
-        const finalWExp = (rawWExp === "N/A" || rawWExp === "-") ? extractExpFromLot(lotNo) : rawWExp;
-        setLotIntel({
-          desc: foundInWorkingAny.hybrid || "",
-          crops: foundInWorkingAny.crops || "",
-          drDate: foundInWorkingAny.drDate || "N/A",
-          expDate: finalWExp,
-          aging: foundInWorkingAny.aging || "-",
-          channel: foundInWorkingAny.kiosk || "",
-        });
-        setIsLotNotFound(false);
-        setIsLotChecking(false);
+        const finalWExp =
+          rawWExp === "N/A" || rawWExp === "-" ? extractExpFromLot(lotNo) : rawWExp;
+        if (!cancelled) {
+          setLotIntel({
+            desc: foundInWorkingAny.hybrid || "",
+            crops: foundInWorkingAny.crops || "",
+            drDate: foundInWorkingAny.drDate || "N/A",
+            expDate: finalWExp,
+            aging: foundInWorkingAny.aging || "-",
+            channel: foundInWorkingAny.kiosk || "",
+          });
+          setIsLotNotFound(false);
+          setIsLotChecking(false);
+        }
         return;
       }
 
@@ -1637,37 +1682,70 @@ const Dashboard = ({
           )
         : null;
 
-      const foundInDrAny = foundInDrForKiosk || (Array.isArray(drSalesData)
-        ? drSalesData.find(
-            (d) =>
-              d.lot &&
-              (String(d.lot).trim().toUpperCase() === lotNo.trim().toUpperCase() ||
-                String(d.lot).toUpperCase().replace(/[^A-Z0-9]/g, "") === cleanTarget),
-          )
-        : null);
+      const foundInDrAny =
+        foundInDrForKiosk ||
+        (Array.isArray(drSalesData)
+          ? drSalesData.find(
+              (d) =>
+                d.lot &&
+                (String(d.lot).trim().toUpperCase() === lotNo.trim().toUpperCase() ||
+                  String(d.lot).toUpperCase().replace(/[^A-Z0-9]/g, "") === cleanTarget),
+            )
+          : null);
 
       if (foundInDrAny) {
         const rawDrExp = foundInDrAny.expired || foundInDrAny.expDate || "N/A";
-        const finalDrExp = (rawDrExp === "N/A" || rawDrExp === "-") ? extractExpFromLot(lotNo) : rawDrExp;
-        setLotIntel({
-          desc: foundInDrAny.hybrid || foundInDrAny.desc || "",
-          crops: foundInDrAny.crops || "",
-          drDate: foundInDrAny.drDate || "N/A",
-          expDate: finalDrExp,
-          aging: foundInDrAny.aging || "-",
-          channel: foundInDrAny.channel || "",
-        });
-        setIsLotNotFound(false);
-        setIsLotChecking(false);
+        const finalDrExp =
+          rawDrExp === "N/A" || rawDrExp === "-" ? extractExpFromLot(lotNo) : rawDrExp;
+        if (!cancelled) {
+          setLotIntel({
+            desc: foundInDrAny.hybrid || foundInDrAny.desc || "",
+            crops: foundInDrAny.crops || "",
+            drDate: foundInDrAny.drDate || "N/A",
+            expDate: finalDrExp,
+            aging: foundInDrAny.aging || "-",
+            channel: foundInDrAny.channel || "",
+          });
+          setIsLotNotFound(false);
+          setIsLotChecking(false);
+        }
         return;
       }
 
-      setLotIntel(null);
-      setIsLotNotFound(true);
-      setIsLotChecking(false);
+      // 2. Optional quick remote fallback ONLY when online (2.5s timeout so weak signal never hangs)
+      if (typeof navigator !== "undefined" && navigator.onLine) {
+        const ctrl = new AbortController();
+        const abortTimer = setTimeout(() => ctrl.abort(), 2500);
+        try {
+          const resp = await customFetch(
+            `${SCRIPT_URL}?action=getLotInfo&lot=${encodeURIComponent(lotNo)}&kiosk=${encodeURIComponent(selectedKiosk)}`,
+            { signal: ctrl.signal },
+          );
+          const res = await resp.json();
+          if (!cancelled && res.status === "success" && res.data) {
+            setLotIntel(res.data);
+            setIsLotNotFound(false);
+            setIsLotChecking(false);
+            return;
+          }
+        } catch {
+          // Offline / timeout fallback cleanly
+        } finally {
+          clearTimeout(abortTimer);
+        }
+      }
+
+      if (!cancelled) {
+        setLotIntel(null);
+        setIsLotNotFound(true);
+        setIsLotChecking(false);
+      }
     };
-    const timer = setTimeout(checkLot, 600);
-    return () => clearTimeout(timer);
+    const timer = setTimeout(checkLot, 250);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
   }, [lotNo, selectedKiosk, drSalesData, rawWorkingData]);
 
   useEffect(() => {
@@ -2015,7 +2093,6 @@ const Dashboard = ({
     ) || deletedItems.length > 0;
 
   const handleUploadActivity = async () => {
-    // Ambil hanya list yang tampil (berdasarkan Kiosk yang terpilih)
     const currentKioskItems = workingData.filter(
       (item) =>
         cleanForMatch(item.kiosk) === cleanForMatch(selectedKiosk) ||
@@ -2023,21 +2100,68 @@ const Dashboard = ({
     );
     if (currentKioskItems.length === 0) return;
 
-    setIsFetchingData(true);
-    setIsSyncing(true);
-    try {
-      await saveBatchActivityToFirestore(firebaseUser, {
+    const finalizeQueuedOffline = (reason?: string) => {
+      enqueueOfflineActivity({
         kioskName: selectedKiosk,
         checkerName: userData.name,
         items: currentKioskItems,
-        currentDataset: normalizedSnapshot,
+        lastError: reason,
       });
+      applyLocalActivityPatch({
+        kioskName: selectedKiosk,
+        checkerName: userData.name,
+        items: currentKioskItems,
+      });
+      clearHomeUnsavedDraftsForKiosk(selectedKiosk);
+      setWorkingData((prev) =>
+        prev.map((row) =>
+          cleanForMatch(row.kiosk) === cleanForMatch(selectedKiosk) ||
+          matchNames(row.kiosk, selectedKiosk)
+            ? {
+                ...row,
+                isNew: false,
+                isEdited: false,
+                condition: "tetap",
+                originalUser: row.user,
+              }
+            : row,
+        ),
+      );
+      setConsolidationSuccessMsg(
+        "Susah Sinyal / Offline: Data opname tersimpan aman di antrean perangkat & otomatis terkirim saat sinyal kembali!",
+      );
+      setTimeout(() => setConsolidationSuccessMsg(""), 6000);
+    };
+
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+      finalizeQueuedOffline("Perangkat offline");
+      return;
+    }
+
+    setIsFetchingData(true);
+    setIsSyncing(true);
+    try {
+      await withTimeout(
+        saveBatchActivityToFirestore(firebaseUser, {
+          kioskName: selectedKiosk,
+          checkerName: userData.name,
+          items: currentKioskItems,
+          currentDataset: normalizedSnapshot,
+        }),
+        6500,
+        "Sinyal lemah (timeout)",
+      );
+      clearHomeUnsavedDraftsForKiosk(selectedKiosk);
       await reloadFromFirestore();
       setConsolidationSuccessMsg("Aktivitas opname berhasil disimpan ke Firestore!");
       setTimeout(() => setConsolidationSuccessMsg(""), 4000);
     } catch (e: any) {
-      console.error("Activity sync failed:", e);
-      alert("Gagal menyimpan aktivitas ke Firestore: " + (e?.message || "Periksa Firestore Rules."));
+      if (isLikelyNetworkError(e)) {
+        finalizeQueuedOffline(e?.message || "Koneksi terputus / lemah");
+      } else {
+        console.error("Activity sync failed:", e);
+        alert("Gagal menyimpan aktivitas ke Firestore: " + (e?.message || "Periksa Firestore Rules."));
+      }
     } finally {
       setIsFetchingData(false);
       setIsSyncing(false);
@@ -6100,12 +6224,50 @@ const Dashboard = ({
               </div>
             </div>
 
-            {/* Shortcut Login ID Switcher */}
+            {/* Shortcut Login ID Switcher + Delta Refresh & PWA Install */}
             <div className="flex flex-col items-start lg:items-end gap-1.5 shrink-0">
-              <div className="flex items-center gap-2">
-                <span className="text-[10px] font-semibold text-white/85 tracking-wide">
-                  Shortcut Login ID
-                </span>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  disabled={isFetchingData || isLoadingFirestore}
+                  onClick={() => fetchWorkingData()}
+                  aria-label={
+                    isFetchingData || isLoadingFirestore
+                      ? "Menyegarkan data"
+                      : needsRefresh && isOnline
+                        ? "Perlu Refresh"
+                        : "Refresh data"
+                  }
+                  className={`relative inline-flex items-center justify-center rounded-lg border text-[11px] font-bold transition-all cursor-pointer disabled:opacity-60 ${
+                    needsRefresh && isOnline && !isFetchingData && !isLoadingFirestore
+                      ? "h-8 px-2.5 gap-1 bg-amber-400 hover:bg-amber-300 text-[#181a2c] border-amber-200 shadow-[0_0_14px_rgba(251,191,36,0.6)]"
+                      : "size-8 bg-white/20 hover:bg-white/30 border-white/30 text-white"
+                  }`}
+                  title={
+                    needsRefresh && isOnline && refreshReason
+                      ? refreshReason
+                      : "Refresh cepat data terbaru menggunakan Delta Mode"
+                  }
+                >
+                  {needsRefresh && isOnline && !isFetchingData && !isLoadingFirestore && (
+                    <span className="absolute -top-1 -right-1 flex h-2.5 w-2.5">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-500 opacity-80" />
+                      <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-rose-600 border border-white" />
+                    </span>
+                  )}
+                  <span
+                    className={`material-symbols-outlined ${
+                      needsRefresh && isOnline && !isFetchingData && !isLoadingFirestore
+                        ? "text-[15px]"
+                        : "text-[17px]"
+                    } ${isFetchingData || isLoadingFirestore ? "animate-spin" : ""}`}
+                  >
+                    refresh
+                  </span>
+                  {needsRefresh && isOnline && !isFetchingData && !isLoadingFirestore && (
+                    <span>Perlu Refresh</span>
+                  )}
+                </button>
                 {!userData?.isPublic && !isAuthorizedFirebase && (
                   <button
                     type="button"
@@ -6211,6 +6373,69 @@ const Dashboard = ({
           </div>
         </div>
       </div>
+
+      {/* Offline / Field Connectivity & Sync Queue Banner */}
+      {(!isOnline || pendingOfflineCount > 0 || offlineSyncBanner || (consolidationSuccessMsg && activeTab !== "temp")) && (
+        <div
+          className={`mb-5 p-3.5 rounded-2xl border flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs ${
+            !isOnline || pendingOfflineCount > 0
+              ? "bg-amber-50 border-amber-200 text-amber-900"
+              : "bg-emerald-50 border-emerald-200 text-emerald-900"
+          }`}
+        >
+          <div className="flex items-start gap-2.5">
+            <span className="material-symbols-outlined text-lg shrink-0 mt-0.5">
+              {!isOnline
+                ? "wifi_off"
+                : pendingOfflineCount > 0
+                  ? "cloud_sync"
+                  : "check_circle"}
+            </span>
+            <div className="space-y-0.5">
+              {!isOnline && (
+                <p className="font-bold">
+                  Mode Susah Sinyal / Offline — Menggunakan cache perangkat. Cek LOT &amp; input opname tetap berjalan normal dan aman tersimpan lokal.
+                </p>
+              )}
+              {pendingOfflineCount > 0 && (
+                <p className="font-semibold">
+                  {pendingOfflineCount} aktivitas opname menunggu sinyal untuk dikirim ke server.{" "}
+                  {isOnline
+                    ? "Sinyal sudah terdeteksi — siap dikirim."
+                    : "Akan otomatis terkirim begitu koneksi kembali."}
+                </p>
+              )}
+              {(offlineSyncBanner || (consolidationSuccessMsg && activeTab !== "temp")) && (
+                <p className="font-bold">
+                  {offlineSyncBanner || consolidationSuccessMsg}
+                </p>
+              )}
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            {pendingOfflineCount > 0 && isOnline && (
+              <button
+                type="button"
+                disabled={isSyncingOfflineQueue}
+                onClick={() => syncOfflineQueueNow()}
+                className="px-3 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-[11px] font-bold flex items-center gap-1 cursor-pointer disabled:opacity-50"
+              >
+                <span className="material-symbols-outlined text-[14px]">cloud_upload</span>
+                {isSyncingOfflineQueue ? "Mengirim..." : "Kirim Sekarang"}
+              </button>
+            )}
+            {offlineSyncBanner && (
+              <button
+                type="button"
+                onClick={clearOfflineSyncBanner}
+                className="px-2 py-1 text-xs font-bold opacity-70 hover:opacity-100 cursor-pointer"
+              >
+                ✕
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       {firestoreReadError && (
         <div className="mb-6 p-4 rounded-2xl bg-amber-50 border border-amber-200 text-amber-900 flex flex-col sm:flex-row sm:items-center justify-between gap-3">

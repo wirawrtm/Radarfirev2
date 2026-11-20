@@ -10,17 +10,36 @@ import {
 } from "../firebase";
 import firebaseConfig from "../../firebase-applet-config.json";
 import {
+  checkHasRemoteUpdates,
   ensureUserBootstrap,
   fetchAllFirestoreData,
+  fetchAllFromCacheOnly,
+  getLastSyncTimestampMs,
+  LAST_SYNC_STORAGE_KEY,
   migrateNormalizedDatasetToFirestore,
-  subscribeToFirestoreCollections,
+  saveBatchActivityToFirestore,
 } from "../services/firestoreDb";
 import {
   buildNormalizedCollections,
+  FISCAL_MONTH_COLS,
+  toIsoDateStr,
+  toStrictDivision,
+  toValidDocId,
+  type MonthlyOpnameCell,
   type NormalizedDataset,
 } from "../utils/firestoreNormalization";
 import { customFetch } from "../utils/api";
 import { SCRIPT_URL, DEFAULT_ACCESS_RULES } from "../utils/constants";
+import { useOnlineStatus } from "../hooks/useOnlineStatus";
+import { cleanForMatch, extractExpFromLot } from "../utils/formatters";
+import {
+  getOfflineActivityQueue,
+  isLikelyNetworkError,
+  markOfflineActivityRetry,
+  OFFLINE_QUEUE_EVENT,
+  removeOfflineActivityById,
+  withTimeout,
+} from "../utils/offlineQueue";
 
 const ACTIVE_DB_LABEL = firebaseConfig.firestoreDatabaseId || firebaseConfig.projectId || "Firestore";
 
@@ -29,6 +48,7 @@ interface FirebaseContextValue {
   isAuthReady: boolean;
   isAuthorizedFirebase: boolean;
   isFirestoreConnected: boolean | null;
+  isOnline: boolean;
   authError: string | null;
   firestoreReadError: string | null;
   firestoreDataset: NormalizedDataset | null;
@@ -38,8 +58,13 @@ interface FirebaseContextValue {
   isMigrating: boolean;
   migrationStage: string | null;
   syncMode: "full" | "delta" | "cache" | null;
-  liveSyncEnabled: boolean;
-  setLiveSyncEnabled: React.Dispatch<React.SetStateAction<boolean>>;
+  lastSyncAt: number | null;
+  needsRefresh: boolean;
+  refreshReason: string | null;
+  pendingOfflineCount: number;
+  isSyncingOfflineQueue: boolean;
+  offlineSyncBanner: string | null;
+  clearOfflineSyncBanner: () => void;
   connectGoogle: () => Promise<User>;
   disconnectGoogle: () => Promise<void>;
   migrateDatasetToFirestore: (
@@ -49,6 +74,12 @@ interface FirebaseContextValue {
   syncFromSourceToFirestore: () => Promise<{ totalDocs: number }>;
   reloadFromFirestore: (options?: { forceFull?: boolean }) => Promise<NormalizedDataset | null>;
   removeLocalFirestoreDocs: (colName: keyof NormalizedDataset, docIds: string[]) => void;
+  applyLocalActivityPatch: (params: {
+    kioskName: string;
+    checkerName: string;
+    items: any[];
+  }) => void;
+  syncOfflineQueueNow: () => Promise<{ synced: number; failed: number }>;
   retryFirestoreSync: () => void;
 }
 
@@ -64,6 +95,7 @@ const EMPTY_DATASET: NormalizedDataset = {
 const FirebaseContext = createContext<FirebaseContextValue | null>(null);
 
 export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const isOnline = useOnlineStatus();
   const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
@@ -78,9 +110,37 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [isMigrating, setIsMigrating] = useState(false);
   const [migrationStage, setMigrationStage] = useState<string | null>(null);
   const [syncMode, setSyncMode] = useState<"full" | "delta" | "cache" | null>(null);
-  const [liveSyncEnabled, setLiveSyncEnabled] = useState(false);
+  const [lastSyncAt, setLastSyncAt] = useState<number | null>(() => getLastSyncTimestampMs());
+  const [needsRefresh, setNeedsRefresh] = useState(false);
+  const [refreshReason, setRefreshReason] = useState<string | null>(null);
+  const [pendingOfflineCount, setPendingOfflineCount] = useState<number>(
+    () => getOfflineActivityQueue().length,
+  );
+  const [isSyncingOfflineQueue, setIsSyncingOfflineQueue] = useState(false);
+  const [offlineSyncBanner, setOfflineSyncBanner] = useState<string | null>(null);
   const [listenerRetryTick, setListenerRetryTick] = useState(0);
   const autoSyncAttemptedRef = useRef(false);
+  const firestoreDatasetRef = useRef<NormalizedDataset | null>(null);
+  const syncingQueueRef = useRef(false);
+  const wasOfflineRef = useRef(!isOnline);
+  const lastRemoteProbeAtRef = useRef(0);
+
+  useEffect(() => {
+    firestoreDatasetRef.current = firestoreDataset;
+  }, [firestoreDataset]);
+
+  useEffect(() => {
+    const updateCount = () => {
+      setPendingOfflineCount(getOfflineActivityQueue().length);
+    };
+    updateCount();
+    window.addEventListener(OFFLINE_QUEUE_EVENT, updateCount);
+    window.addEventListener("storage", updateCount);
+    return () => {
+      window.removeEventListener(OFFLINE_QUEUE_EVENT, updateCount);
+      window.removeEventListener("storage", updateCount);
+    };
+  }, []);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (user) => {
@@ -121,12 +181,37 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       try {
         const connected = await testConnection();
         setIsFirestoreConnected(connected);
-        if (verifiedAdmin) {
+
+        if (!connected && !options?.forceFull) {
+          const cached = await fetchAllFromCacheOnly(verifiedAdmin);
+          if (cached) {
+            setFirestoreReadError(null);
+            setSyncMode("cache");
+            setFirestoreDataset(cached.dataset);
+            if (Object.keys(cached.accessRules).length > 0) {
+              setFirestoreAccessRules(cached.accessRules);
+            }
+            return cached.dataset;
+          }
+          if (firestoreDatasetRef.current) {
+            setSyncMode("cache");
+            return firestoreDatasetRef.current;
+          }
+        }
+
+        if (verifiedAdmin && connected) {
           await ensureUserBootstrap(verifiedAdmin);
         }
+
         const data = await fetchAllFirestoreData(verifiedAdmin, options);
         setFirestoreReadError(null);
-        setSyncMode(data.syncMode || "full");
+        const resolvedMode = data.syncMode || "delta";
+        setSyncMode(resolvedMode);
+        setLastSyncAt(getLastSyncTimestampMs());
+        if (resolvedMode === "delta" || resolvedMode === "full") {
+          setNeedsRefresh(false);
+          setRefreshReason(null);
+        }
         setFirestoreDataset(data.dataset);
         if (Object.keys(data.accessRules).length > 0) {
           setFirestoreAccessRules(data.accessRules);
@@ -137,13 +222,36 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         const isPermDenied =
           errText.toLowerCase().includes("permission") ||
           errText.toLowerCase().includes("insufficient");
+
+        if (!isPermDenied && !options?.forceFull) {
+          const cached = await fetchAllFromCacheOnly(verifiedAdmin);
+          if (cached) {
+            setFirestoreReadError(null);
+            setSyncMode("cache");
+            setFirestoreDataset(cached.dataset);
+            if (Object.keys(cached.accessRules).length > 0) {
+              setFirestoreAccessRules(cached.accessRules);
+            }
+            return cached.dataset;
+          }
+          if (firestoreDatasetRef.current) {
+            setSyncMode("cache");
+            setFirestoreReadError(null);
+            return firestoreDatasetRef.current;
+          }
+        }
+
+        if (options?.forceFull && isLikelyNetworkError(err)) {
+          throw err;
+        }
+
         setFirestoreReadError(
           isPermDenied
             ? `Akses baca & edit belum aktif di Firestore Rules (${ACTIVE_DB_LABEL}). Login dengan ${BOOTSTRAPPED_ADMIN_EMAIL} atau publikasikan firestore.rules.`
             : `Gagal terhubung ke database Firebase (${ACTIVE_DB_LABEL}). Periksa koneksi internet Anda.`,
         );
         setFirestoreDataset((prev) => prev || EMPTY_DATASET);
-        return null;
+        return firestoreDatasetRef.current || null;
       } finally {
         setIsLoadingFirestore(false);
       }
@@ -166,6 +274,220 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     },
     [],
   );
+
+  const applyLocalActivityPatch = useCallback(
+    (params: { kioskName: string; checkerName: string; items: any[] }) => {
+      setFirestoreDataset((prev) => {
+        const base = prev || EMPTY_DATASET;
+        const nextHybrids = [...base.hybrids];
+        const nextLots = [...base.lots];
+        const nextLogs = [...base.opname_logs];
+
+        const checker = base.employees.find(
+          (e) =>
+            cleanForMatch(e.full_name) === cleanForMatch(params.checkerName) ||
+            cleanForMatch(e.username) === cleanForMatch(params.checkerName),
+        );
+        const cleanKiosk = cleanForMatch(params.kioskName);
+        const partner =
+          (checker
+            ? base.partners.find(
+                (p) =>
+                  cleanForMatch(p.partner_name) === cleanKiosk &&
+                  p.pic_employee_id === checker.doc_id,
+              )
+            : undefined) ||
+          base.partners.find((p) => cleanForMatch(p.partner_name) === cleanKiosk);
+
+        const hybridByClean = new Map(
+          nextHybrids.map((h) => [cleanForMatch(h.hybrid_name), h]),
+        );
+        const lotIds = new Set(nextLots.map((l) => toValidDocId(l.doc_id)));
+        const logIndexById = new Map(
+          nextLogs.map((l, idx) => [toValidDocId(l.doc_id), idx]),
+        );
+
+        for (const item of params.items || []) {
+          const lotNo = toValidDocId(String(item.lot || "").toUpperCase(), "");
+          if (!lotNo) continue;
+
+          const lotUpper = String(item.lot || "").trim().toUpperCase();
+          const rawHybrid = String(item.hybrid || "").trim();
+          const inferredHybrid =
+            rawHybrid && rawHybrid.toLowerCase() !== "unknown"
+              ? rawHybrid
+              : lotUpper.startsWith("PL52B") || lotUpper.startsWith("PJ52B")
+                ? "MADU 59"
+                : "ADV808";
+          const hybName = inferredHybrid.toUpperCase();
+          const hybClean = cleanForMatch(hybName);
+          let hyb = hybridByClean.get(hybClean);
+          if (!hyb) {
+            const hybId = `HYB-LOC-${Date.now().toString(36).toUpperCase()}`;
+            hyb = {
+              doc_id: hybId,
+              hybrid_name: hybName,
+              crop_type: toStrictDivision(item.crops),
+            };
+            hybridByClean.set(hybClean, hyb);
+            nextHybrids.push(hyb);
+          }
+
+          if (!lotIds.has(lotNo)) {
+            lotIds.add(lotNo);
+            nextLots.push({
+              doc_id: lotNo,
+              hybrid_id: hyb.doc_id,
+              shipping_date: toIsoDateStr(item.drDate) || "",
+              exp_date: toIsoDateStr(item.expired || extractExpFromLot(item.lot)) || "",
+              initial_dr_kg: 0,
+            });
+          }
+
+          const prtPart = partner ? partner.doc_id : toValidDocId(params.kioskName, "NO_PRT");
+          const chkPart = checker ? checker.doc_id : toValidDocId(params.checkerName, "NO_CHK");
+          const preferredLogId = toValidDocId(`${prtPart}_${lotNo}_${chkPart}_FY2026`);
+          const legacyLogId = toValidDocId(`${prtPart}_${lotNo}_FY2026`);
+          const existingIdx = logIndexById.has(preferredLogId)
+            ? logIndexById.get(preferredLogId)!
+            : logIndexById.has(legacyLogId)
+              ? logIndexById.get(legacyLogId)!
+              : -1;
+          const existingLog = existingIdx >= 0 ? nextLogs[existingIdx] : undefined;
+          const logId = existingLog ? existingLog.doc_id : preferredLogId;
+
+          const monthPayload: Record<string, MonthlyOpnameCell | null> = {};
+          let prevVal: number | null = null;
+          FISCAL_MONTH_COLS.forEach(({ key }) => {
+            const isEditedMonth = Boolean(item[`edited_${key}`]);
+            const val = Number(item[key]);
+            const hasVal =
+              item[key] !== undefined &&
+              item[key] !== null &&
+              String(item[key]).trim() !== "" &&
+              (val > 0 || isEditedMonth);
+            const prevCell = existingLog?.[key];
+            if (hasVal || prevCell) {
+              const qty = hasVal ? Math.max(0, val) : Math.max(0, prevCell?.idle || 0);
+              const inKg =
+                isEditedMonth && item[`in_${key}`] !== undefined
+                  ? Math.max(0, Number(item[`in_${key}`]) || 0)
+                  : prevVal === null
+                    ? qty
+                    : qty > prevVal
+                      ? qty - prevVal
+                      : 0;
+              const pogKg =
+                isEditedMonth && item[`pog_${key}`] !== undefined
+                  ? Math.max(0, Number(item[`pog_${key}`]) || 0)
+                  : prevVal !== null && qty < prevVal
+                    ? prevVal - qty
+                    : 0;
+              monthPayload[key] = { in: inKg, idle: qty, pog: pogKg };
+              prevVal = qty;
+            } else {
+              monthPayload[key] = null;
+            }
+          });
+
+          const updatedLog = {
+            doc_id: logId,
+            _key: logId,
+            partner_id: partner ? partner.doc_id : null,
+            lot_no: lotNo,
+            checker_id: checker ? checker.doc_id : existingLog?.checker_id || null,
+            crop_year: "FY2026",
+            apr: monthPayload.apr || null,
+            mei: monthPayload.mei || null,
+            jun: monthPayload.jun || null,
+            jul: monthPayload.jul || null,
+            ags: monthPayload.ags || null,
+            sep: monthPayload.sep || null,
+            okt: monthPayload.okt || null,
+            nov: monthPayload.nov || null,
+            des: monthPayload.des || null,
+            jan: monthPayload.jan || null,
+            feb: monthPayload.feb || null,
+            mar: monthPayload.mar || null,
+          };
+
+          if (existingIdx >= 0) {
+            nextLogs[existingIdx] = updatedLog;
+          } else {
+            logIndexById.set(logId, nextLogs.length);
+            nextLogs.push(updatedLog);
+          }
+        }
+
+        return {
+          ...base,
+          hybrids: nextHybrids,
+          lots: nextLots,
+          opname_logs: nextLogs,
+        };
+      });
+    },
+    [],
+  );
+
+  const syncOfflineQueueNow = useCallback(async (): Promise<{
+    synced: number;
+    failed: number;
+  }> => {
+    const queue = getOfflineActivityQueue();
+    if (queue.length === 0) return { synced: 0, failed: 0 };
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+      return { synced: 0, failed: queue.length };
+    }
+    if (syncingQueueRef.current) {
+      return { synced: 0, failed: 0 };
+    }
+
+    syncingQueueRef.current = true;
+    setIsSyncingOfflineQueue(true);
+    let synced = 0;
+    let failed = 0;
+
+    try {
+      const current = auth.currentUser;
+      const dataset = firestoreDatasetRef.current || EMPTY_DATASET;
+
+      for (const entry of queue) {
+        try {
+          await withTimeout(
+            saveBatchActivityToFirestore(current, {
+              kioskName: entry.kioskName,
+              checkerName: entry.checkerName,
+              items: entry.items,
+              currentDataset: dataset,
+            }),
+            9000,
+            "Koneksi terlalu lambat saat mengirim antrean offline.",
+          );
+          removeOfflineActivityById(entry.id);
+          synced++;
+        } catch (err: any) {
+          failed++;
+          markOfflineActivityRetry(entry.id, err?.message || "Gagal kirim ke Firestore");
+          if (isLikelyNetworkError(err)) {
+            break;
+          }
+        }
+      }
+
+      if (synced > 0) {
+        await reloadFromFirestore();
+        setOfflineSyncBanner(
+          `${synced} aktivitas offline berhasil dikirim ke Firestore saat sinyal kembali!`,
+        );
+      }
+      return { synced, failed };
+    } finally {
+      syncingQueueRef.current = false;
+      setIsSyncingOfflineQueue(false);
+      setPendingOfflineCount(getOfflineActivityQueue().length);
+    }
+  }, [reloadFromFirestore]);
 
   const migrateDatasetToFirestore = useCallback(
     async (
@@ -235,18 +557,20 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
   }, [reloadFromFirestore]);
 
-  // Smart Cache + Delta Sync on startup; optional real-time listeners only when liveSyncEnabled is true
+  // Pure Delta Mode: Smart Cache + Delta Sync on startup (with offline cache fallback)
   useEffect(() => {
     if (!isAuthReady) return;
-
-    let unsubFirestore: (() => void) | null = null;
     let cancelled = false;
-    const listenerUser = isAuthorizedFirebase && firebaseUser ? firebaseUser : null;
 
     (async () => {
       try {
         const loaded = await reloadFromFirestore();
         if (cancelled || !loaded) return;
+
+        // Only attempt auto-seed from Sheets when online
+        if (typeof navigator !== "undefined" && !navigator.onLine) {
+          return;
+        }
 
         const isCompletelyEmpty =
           loaded.employees.length === 0 &&
@@ -292,43 +616,6 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           } catch (syncErr) {
             console.warn("Auto-sync dari database sumber gagal:", syncErr);
           }
-          if (cancelled) return;
-        }
-
-        if (liveSyncEnabled) {
-          unsubFirestore = subscribeToFirestoreCollections(
-            listenerUser,
-            (partial) => {
-              if (cancelled) return;
-              setFirestoreReadError(null);
-              if (partial.dataset) {
-                setFirestoreDataset((prev) => ({
-                  employees: partial.dataset?.employees ?? prev?.employees ?? [],
-                  partners: partial.dataset?.partners ?? prev?.partners ?? [],
-                  hybrids: partial.dataset?.hybrids ?? prev?.hybrids ?? [],
-                  lots: partial.dataset?.lots ?? prev?.lots ?? [],
-                  dr_shipments: partial.dataset?.dr_shipments ?? prev?.dr_shipments ?? [],
-                  opname_logs: partial.dataset?.opname_logs ?? prev?.opname_logs ?? [],
-                }));
-              }
-              if (partial.accessRules && Object.keys(partial.accessRules).length > 0) {
-                setFirestoreAccessRules(partial.accessRules);
-              }
-            },
-            (err) => {
-              if (cancelled) return;
-              const errText = String((err as any)?.message || err || "");
-              const isPermDenied =
-                errText.toLowerCase().includes("permission") ||
-                errText.toLowerCase().includes("insufficient");
-              setFirestoreReadError(
-                isPermDenied
-                  ? `Akses baca & edit tanpa login belum aktif di Firestore Rules (${ACTIVE_DB_LABEL}). Salin & publikasikan firestore.rules terbaru di Firebase Console.`
-                  : "Sinkronisasi real-time Firestore terganggu.",
-              );
-              setFirestoreDataset((prev) => prev || EMPTY_DATASET);
-            },
-          );
         }
       } catch (err) {
         console.error("Failed to initialize Firestore data:", err);
@@ -337,20 +624,122 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
     return () => {
       cancelled = true;
-      if (unsubFirestore) unsubFirestore();
     };
   }, [
     isAuthReady,
     isAuthorizedFirebase,
     firebaseUser,
-    liveSyncEnabled,
     listenerRetryTick,
     reloadFromFirestore,
     syncFromSourceToFirestore,
   ]);
 
+  // Auto-flush queued offline submissions when internet returns
+  useEffect(() => {
+    if (!isAuthReady || !isOnline || !firestoreDataset) return;
+    if (getOfflineActivityQueue().length === 0) return;
+
+    const timer = setTimeout(() => {
+      syncOfflineQueueNow().catch(() => {});
+    }, 1200);
+    return () => clearTimeout(timer);
+  }, [isAuthReady, isOnline, firestoreDataset, syncOfflineQueueNow]);
+
+  // Smart Refresh Reminder triggers (quota-safe: local checks + throttled 5m focus probe)
+  useEffect(() => {
+    if (!isOnline) {
+      wasOfflineRef.current = true;
+      return;
+    }
+
+    if (wasOfflineRef.current) {
+      wasOfflineRef.current = false;
+      setNeedsRefresh(true);
+      setRefreshReason(
+        "Sinyal internet baru tersambung kembali — klik Refresh untuk mengambil data terbaru.",
+      );
+      return;
+    }
+
+    if (syncMode === "cache") {
+      setNeedsRefresh(true);
+      setRefreshReason(
+        "Data masih berasal dari cache offline — sinyal tersedia, klik Refresh untuk sinkronkan.",
+      );
+    }
+  }, [isOnline, syncMode]);
+
+  useEffect(() => {
+    if (!isAuthReady || !isOnline) return;
+
+    const STALE_THRESHOLD_MS = 10 * 60 * 1000;
+    const PROBE_COOLDOWN_MS = 5 * 60 * 1000;
+
+    const evaluateStaleness = () => {
+      if (!lastSyncAt) return;
+      if (Date.now() - lastSyncAt >= STALE_THRESHOLD_MS) {
+        setNeedsRefresh(true);
+        setRefreshReason(
+          "Sudah lebih dari 10 menit sejak sinkronisasi terakhir — klik Refresh untuk cek pembaruan.",
+        );
+      }
+    };
+
+    const probeRemoteIfVisible = async () => {
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+      if (!lastSyncAt) return;
+      const now = Date.now();
+      if (now - lastSyncAt < 60 * 1000) return;
+      if (now - lastRemoteProbeAtRef.current < PROBE_COOLDOWN_MS) return;
+
+      lastRemoteProbeAtRef.current = now;
+      const hasNew = await checkHasRemoteUpdates(lastSyncAt);
+      if (hasNew) {
+        setNeedsRefresh(true);
+        setRefreshReason(
+          "Ada pembaruan data baru dari pengguna lain — klik Refresh untuk memuat.",
+        );
+      }
+    };
+
+    evaluateStaleness();
+    const interval = setInterval(evaluateStaleness, 60 * 1000);
+
+    const onVisibilityOrFocus = () => {
+      evaluateStaleness();
+      probeRemoteIfVisible().catch(() => {});
+    };
+
+    const onStorageSync = (e: StorageEvent) => {
+      if (e.key === LAST_SYNC_STORAGE_KEY && e.newValue) {
+        const externalMs = Number(e.newValue);
+        if (Number.isFinite(externalMs) && (!lastSyncAt || externalMs > lastSyncAt)) {
+          setNeedsRefresh(true);
+          setRefreshReason(
+            "Ada sinkronisasi terbaru dari tab lain — klik Refresh untuk menyelaraskan tampilan.",
+          );
+        }
+      }
+    };
+
+    document.addEventListener("visibilitychange", onVisibilityOrFocus);
+    window.addEventListener("focus", onVisibilityOrFocus);
+    window.addEventListener("storage", onStorageSync);
+
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisibilityOrFocus);
+      window.removeEventListener("focus", onVisibilityOrFocus);
+      window.removeEventListener("storage", onStorageSync);
+    };
+  }, [isAuthReady, isOnline, lastSyncAt]);
+
   const retryFirestoreSync = useCallback(() => {
     setListenerRetryTick((t) => t + 1);
+  }, []);
+
+  const clearOfflineSyncBanner = useCallback(() => {
+    setOfflineSyncBanner(null);
   }, []);
 
   const connectGoogle = useCallback(async () => {
@@ -389,6 +778,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         isAuthReady,
         isAuthorizedFirebase,
         isFirestoreConnected,
+        isOnline,
         authError,
         firestoreReadError,
         firestoreDataset,
@@ -398,14 +788,21 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         isMigrating,
         migrationStage,
         syncMode,
-        liveSyncEnabled,
-        setLiveSyncEnabled,
+        lastSyncAt,
+        needsRefresh,
+        refreshReason,
+        pendingOfflineCount,
+        isSyncingOfflineQueue,
+        offlineSyncBanner,
+        clearOfflineSyncBanner,
         connectGoogle,
         disconnectGoogle,
         migrateDatasetToFirestore,
         syncFromSourceToFirestore,
         reloadFromFirestore,
         removeLocalFirestoreDocs,
+        applyLocalActivityPatch,
+        syncOfflineQueueNow,
         retryFirestoreSync,
       }}
     >

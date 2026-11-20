@@ -218,14 +218,19 @@ export const TempTab: React.FC<TempTabProps> = ({
     isMigrating,
     migrationStage,
     syncMode,
-    liveSyncEnabled,
-    setLiveSyncEnabled,
+    isOnline,
+    lastSyncAt,
+    needsRefresh,
+    refreshReason,
+    pendingOfflineCount,
+    isSyncingOfflineQueue,
     connectGoogle,
     disconnectGoogle,
     migrateDatasetToFirestore,
     syncFromSourceToFirestore,
     reloadFromFirestore,
     removeLocalFirestoreDocs,
+    syncOfflineQueueNow,
   } = useFirebase();
 
   const [uploadedDrRows, setUploadedDrRows] = useState<any[]>([]);
@@ -3334,38 +3339,164 @@ export const TempTab: React.FC<TempTabProps> = ({
         </div>
       )}
 
-      {/* Firebase Firestore Live Connection & Rules Bar */}
+      {/* Firebase Firestore Delta Mode & Refresh Bar */}
       <div className="bg-gradient-to-r from-[#154be2]/[0.06] via-white to-emerald-50/70 p-4 sm:p-5 rounded-2xl border border-[#154be2]/15 flex flex-col gap-3.5">
         <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3.5">
           <div className="min-w-0 flex-1 space-y-1">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-700 text-[11px] font-bold">
-                <span className="material-symbols-outlined text-[15px]">cloud_done</span>
-                {liveSyncEnabled
-                  ? "Realtime Live Sync"
-                  : syncMode === "delta"
-                    ? "Smart Cache + Delta Sync"
-                    : "Firestore Cache Sync"}
+              <span
+                className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-lg border text-[11px] font-bold ${
+                  !isOnline
+                    ? "bg-amber-50 border-amber-200 text-amber-800"
+                    : "bg-emerald-50 border-emerald-200 text-emerald-700"
+                }`}
+              >
+                <span className="material-symbols-outlined text-[15px]">
+                  {!isOnline ? "cloud_off" : "offline_bolt"}
+                </span>
+                {!isOnline
+                  ? "Mode Offline (Cache Lokal)"
+                  : syncMode === "cache"
+                    ? "Delta Mode · Cache Perangkat"
+                    : "Delta Mode"}
               </span>
               <span className="text-[11px] font-semibold text-[#434655]">
                 Hemat Kuota 200+ User
               </span>
+              {lastSyncAt && (
+                <span className="text-[11px] text-[#747687] font-mono">
+                  · Sinkron:{" "}
+                  {new Date(lastSyncAt).toLocaleTimeString("id-ID", {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  })}
+                </span>
+              )}
+              {pendingOfflineCount > 0 && (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-amber-100 text-amber-900 text-[11px] font-bold">
+                  {pendingOfflineCount} Antrean Offline
+                </span>
+              )}
+              {needsRefresh && isOnline && (
+                <span
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-amber-100 border border-amber-300 text-amber-900 text-[11px] font-bold"
+                  title={refreshReason || "Klik tombol Refresh untuk menarik data terbaru"}
+                >
+                  <span className="h-1.5 w-1.5 rounded-full bg-rose-600 animate-pulse" />
+                  Butuh Refresh
+                </span>
+              )}
             </div>
             <p className="text-xs text-[#434655] leading-relaxed break-words">
               {isMigrating && migrationStage
                 ? migrationStage
                 : isLoadingFirestore
-                  ? "Menarik pembaruan data dari Firestore..."
-                  : hasFirestoreData
-                    ? `Terhubung ke Firebase Firestore (${firebaseConfig.firestoreDatabaseId || firebaseConfig.projectId}) · ID anti-bentrok & cache lokal aktif.`
-                    : `Terhubung ke Firebase Firestore (${firebaseConfig.firestoreDatabaseId || firebaseConfig.projectId}) · Database kosong (0 dokumen). Siap menerima input atau tarik dari Google Sheets.`}
+                  ? "Menarik pembaruan delta terbaru dari Firestore..."
+                  : !isOnline
+                    ? "Koneksi terputus / susah sinyal — menampilkan data tersimpan di cache perangkat. Input tetap aman & otomatis terkirim saat sinyal kembali."
+                    : hasFirestoreData
+                      ? `Terhubung ke Firebase Firestore (${firebaseConfig.firestoreDatabaseId || firebaseConfig.projectId}) · Delta Mode aktif (tarik data berubah saja).`
+                      : `Terhubung ke Firebase Firestore (${firebaseConfig.firestoreDatabaseId || firebaseConfig.projectId}) · Database kosong (0 dokumen). Siap menerima input atau tarik dari Google Sheets.`}
             </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2 lg:justify-end">
+            {pendingOfflineCount > 0 && isOnline && (
+              <button
+                type="button"
+                disabled={isSyncingOfflineQueue}
+                onClick={async () => {
+                  const res = await syncOfflineQueueNow();
+                  if (res.synced > 0) {
+                    showToast(`${res.synced} data antrean offline berhasil dikirim ke Firestore.`);
+                  } else if (res.failed > 0) {
+                    showToast("Sinyal masih lemah. Data tetap aman di antrean perangkat.");
+                  }
+                }}
+                className="h-9 px-3.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-white text-xs font-bold inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer shadow-sm disabled:opacity-50"
+              >
+                <span className="material-symbols-outlined text-[16px]">cloud_upload</span>
+                {isSyncingOfflineQueue ? "Mengirim..." : `Kirim Antrean (${pendingOfflineCount})`}
+              </button>
+            )}
             <button
               type="button"
               disabled={isLoadingFirestore || isMigrating}
+              onClick={async () => {
+                try {
+                  const loaded = await reloadFromFirestore();
+                  if (loaded) {
+                    showToast(
+                      !isOnline
+                        ? "Data dimuat dari cache perangkat (Offline)."
+                        : "Data terbaru berhasil diperbarui (Delta Refresh).",
+                    );
+                  }
+                } catch (err: any) {
+                  showToast(err?.message || "Gagal me-refresh data dari Firestore.");
+                }
+              }}
+              aria-label={
+                isLoadingFirestore
+                  ? "Menyegarkan data"
+                  : needsRefresh && isOnline
+                    ? "Perlu Refresh"
+                    : "Refresh data"
+              }
+              className={`relative h-9 rounded-xl text-white text-xs font-bold inline-flex items-center justify-center shrink-0 cursor-pointer shadow-sm transition-all disabled:opacity-50 ${
+                needsRefresh && isOnline && !isLoadingFirestore && !isMigrating
+                  ? "px-3.5 gap-1.5 whitespace-nowrap bg-amber-500 hover:bg-amber-600 ring-2 ring-amber-300/80"
+                  : "w-9 bg-emerald-600 hover:bg-emerald-700"
+              }`}
+              title={
+                needsRefresh && isOnline && refreshReason
+                  ? refreshReason
+                  : "Refresh cepat menggunakan Delta Mode (hanya menarik data baru/berubah & hemat kuota)"
+              }
+            >
+              {needsRefresh && isOnline && !isLoadingFirestore && !isMigrating && (
+                <span className="absolute -top-1 -right-1 flex h-2.5 w-2.5">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-500 opacity-80" />
+                  <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-rose-600 border border-white" />
+                </span>
+              )}
+              <span
+                className={`material-symbols-outlined ${
+                  needsRefresh && isOnline && !isLoadingFirestore && !isMigrating
+                    ? "text-[16px]"
+                    : "text-[18px]"
+                } ${isLoadingFirestore ? "animate-spin" : ""}`}
+              >
+                refresh
+              </span>
+              {needsRefresh && isOnline && !isLoadingFirestore && !isMigrating && (
+                <span>Perlu Refresh</span>
+              )}
+            </button>
+            <button
+              type="button"
+              disabled={isLoadingFirestore || isMigrating || !isOnline}
+              onClick={async () => {
+                try {
+                  await reloadFromFirestore({ forceFull: true });
+                  showToast("Data penuh terbaru berhasil ditarik dari Firebase Firestore.");
+                } catch (err: any) {
+                  showToast(err?.message || "Gagal memuat ulang penuh data dari Firestore.");
+                }
+              }}
+              className="h-9 px-3 rounded-xl bg-white border border-[#e0e0fa] hover:bg-[#f4f2ff] text-[#181a2c] text-xs font-bold inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer disabled:opacity-50"
+              title={
+                !isOnline
+                  ? "Butuh koneksi internet untuk Muat Ulang Penuh"
+                  : "Tarik ulang seluruh data dari awal (termasuk data yang dihapus pengguna lain)"
+              }
+            >
+              <span className="material-symbols-outlined text-[15px] text-emerald-600">sync</span>
+              Muat Ulang Penuh
+            </button>
+            <button
+              type="button"
+              disabled={isLoadingFirestore || isMigrating || !isOnline}
               onClick={async () => {
                 try {
                   const res = await syncFromSourceToFirestore();
@@ -3378,37 +3509,6 @@ export const TempTab: React.FC<TempTabProps> = ({
             >
               <span className="material-symbols-outlined text-[16px]">cloud_download</span>
               {isMigrating ? "Menarik Data..." : "Tarik Google Sheets"}
-            </button>
-            <button
-              type="button"
-              disabled={isLoadingFirestore || isMigrating}
-              onClick={async () => {
-                try {
-                  await reloadFromFirestore({ forceFull: true });
-                  showToast("Data penuh terbaru berhasil ditarik dari Firebase Firestore.");
-                } catch (err: any) {
-                  showToast(err?.message || "Gagal memuat ulang data dari Firestore.");
-                }
-              }}
-              className="h-9 px-3.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer shadow-sm disabled:opacity-50"
-            >
-              <span className="material-symbols-outlined text-[16px]">sync</span>
-              {isLoadingFirestore ? "Memuat..." : "Muat Ulang Penuh"}
-            </button>
-            <button
-              type="button"
-              onClick={() => setLiveSyncEnabled((v) => !v)}
-              className={`h-9 px-3 rounded-xl border text-xs font-bold inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer ${
-                liveSyncEnabled
-                  ? "bg-amber-50 border-amber-300 text-amber-800"
-                  : "bg-white border-[#e0e0fa] hover:bg-[#f4f2ff] text-[#434655]"
-              }`}
-              title="Aktifkan/matikan listener real-time (mode default Delta Sync lebih hemat kuota untuk 200 user)"
-            >
-              <span className="material-symbols-outlined text-[15px]">
-                {liveSyncEnabled ? "sensors" : "offline_bolt"}
-              </span>
-              {liveSyncEnabled ? "Live: ON" : "Delta Mode"}
             </button>
             <button
               type="button"

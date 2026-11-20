@@ -1,7 +1,6 @@
 import { handleGetUserProfile } from "./employeeUtils";
 
 const APPS_SCRIPT_URL =
-  process.env.GOOGLE_APPS_SCRIPT_URL ||
   "https://script.google.com/macros/s/AKfycbxUUPKhsEo-LencnYjex3gOhVl7w2tS154VCICVbqGfFSBLAwzv0P7XOu9oMTE1jTUg1g/exec";
 
 export async function proxyToAppsScript(req: any, res: any): Promise<boolean> {

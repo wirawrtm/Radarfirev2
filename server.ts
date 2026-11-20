@@ -6,7 +6,6 @@ import dotenv from "dotenv";
 import {
   initLocalDb,
 } from "./server/sheetsDb";
-import { proxyToAppsScript } from "./server/proxy";
 import { handleGetEmployees, handleGetUserProfile } from "./server/employeeUtils";
 import {
   handleGetAccessRules,
