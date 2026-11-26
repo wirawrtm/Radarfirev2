@@ -175,10 +175,11 @@ export const TempTab: React.FC<TempTabProps> = ({
   const [activeCollection, setActiveCollection] = useState<CollectionKey>("opname_logs");
   const [viewMode, setViewMode] = useState<"table" | "json">("table");
   const isGlobalBa = useMemo(() => checkIsBusinessAnalyst(userData), [userData]);
-  const [activeDivision, setActiveDivision] = useState<"Field Corn" | "Vegetables">(() => {
-    const raw = String(userData?.group || "").toLowerCase();
+  const [activeDivision, setActiveDivision] = useState<"All" | "Field Corn" | "Vegetables">(() => {
+    const raw = String(userData?.group || userData?.division || "").toLowerCase();
     if (raw.includes("veg")) return "Vegetables";
-    return "Field Corn";
+    if (raw.includes("field")) return "Field Corn";
+    return "All";
   });
   const [simulatedLoginEmpId, setSimulatedLoginEmpId] = useState<string>("ADMIN_DIV");
   const [colFilters, setColFilters] = useState<Record<string, string>>({});
@@ -1127,6 +1128,16 @@ export const TempTab: React.FC<TempTabProps> = ({
 
   useEffect(() => {
     if (!userData || userData.isPublic || isGlobalBa) {
+      const divRaw = String(userData?.group || userData?.division || "").toLowerCase();
+      if (userData?.isPublic) {
+        setActiveDivision("All");
+      } else if (divRaw.includes("veg")) {
+        setActiveDivision("Vegetables");
+      } else if (divRaw.includes("field")) {
+        setActiveDivision("Field Corn");
+      } else {
+        setActiveDivision("All");
+      }
       if (isGlobalBa) {
         setSimulatedLoginEmpId("ADMIN_DIV");
       }
@@ -1153,7 +1164,11 @@ export const TempTab: React.FC<TempTabProps> = ({
         : undefined);
 
     if (matchedEmp) {
-      if (matchedEmp.division_group === "Field Corn" || matchedEmp.division_group === "Vegetables") {
+      if (
+        matchedEmp.division_group === "Field Corn" ||
+        matchedEmp.division_group === "Vegetables" ||
+        matchedEmp.division_group === "All"
+      ) {
         setActiveDivision(matchedEmp.division_group);
       }
       setSimulatedLoginEmpId(matchedEmp.doc_id);
@@ -1161,26 +1176,36 @@ export const TempTab: React.FC<TempTabProps> = ({
       const divRaw = String(userData.group || userData.division || "").toLowerCase();
       if (divRaw.includes("veg")) setActiveDivision("Vegetables");
       else if (divRaw.includes("field")) setActiveDivision("Field Corn");
+      else setActiveDivision("All");
       setSimulatedLoginEmpId("ADMIN_DIV");
     }
   }, [userData, isGlobalBa, empById, empByClean, employeesCol]);
 
   // Active simulated login employee scope:
-  // - Admin: melihat SEMUA data, namun HANYA division group Field Corn atau Vegetables sesuai activeDivision
+  // - Admin: melihat SEMUA data sesuai effectiveDivision (All, Field Corn, atau Vegetables)
   // - Sales (Lv.1 - Lv.4): melihat datanya sendiri + seluruh bawahannya (under)
   const activeLoginEmp = useMemo(
     () => (simulatedLoginEmpId !== "ADMIN_DIV" ? empById.get(simulatedLoginEmpId) || null : null),
     [simulatedLoginEmpId, empById],
   );
 
-  const effectiveDivision: "Field Corn" | "Vegetables" =
-    activeLoginEmp && (activeLoginEmp.division_group === "Field Corn" || activeLoginEmp.division_group === "Vegetables")
+  const effectiveDivision: "All" | "Field Corn" | "Vegetables" =
+    activeLoginEmp &&
+    (activeLoginEmp.division_group === "Field Corn" ||
+      activeLoginEmp.division_group === "Vegetables" ||
+      activeLoginEmp.division_group === "All")
       ? activeLoginEmp.division_group
       : activeDivision;
+
+  const defaultStrictDivision: "Field Corn" | "Vegetables" =
+    effectiveDivision === "Vegetables" ? "Vegetables" : "Field Corn";
 
   const allowedEmpSet = useMemo(() => {
     if (activeLoginEmp) {
       return new Set(activeLoginEmp.access_scope_ids);
+    }
+    if (effectiveDivision === "All") {
+      return new Set(employeesCol.map((e) => e.doc_id));
     }
     return new Set(
       employeesCol
@@ -1362,9 +1387,11 @@ export const TempTab: React.FC<TempTabProps> = ({
             p.pic_employee_id &&
             allowedEmpSet.has(p.pic_employee_id),
         )
-      : partnersCol.filter(
-          (p) => (partnerDivMap.get(p.doc_id) || p.division_group) === effectiveDivision,
-        );
+      : effectiveDivision === "All"
+        ? partnersCol
+        : partnersCol.filter(
+            (p) => (partnerDivMap.get(p.doc_id) || p.division_group) === effectiveDivision,
+          );
     return base.map((p) => ({
       ...p,
       pic_employee_name:
@@ -1396,6 +1423,9 @@ export const TempTab: React.FC<TempTabProps> = ({
           (l.checker_id && allowedEmpSet.has(l.checker_id)) ||
             (l.partner_id && allowedPartnerSet.has(l.partner_id)),
         );
+      }
+      if (effectiveDivision === "All") {
+        return true;
       }
       if (l.partner_id && partnerDivMap.has(l.partner_id)) {
         return partnerDivMap.get(l.partner_id) === effectiveDivision;
@@ -1437,6 +1467,9 @@ export const TempTab: React.FC<TempTabProps> = ({
       if (activeLoginEmp) {
         return Boolean(d.partner_id && allowedPartnerSet.has(d.partner_id));
       }
+      if (effectiveDivision === "All") {
+        return true;
+      }
       if (d.partner_id && partnerDivMap.has(d.partner_id)) {
         return partnerDivMap.get(d.partner_id) === effectiveDivision;
       }
@@ -1473,6 +1506,9 @@ export const TempTab: React.FC<TempTabProps> = ({
     if (activeLoginEmp) {
       return referencedLotIds;
     }
+    if (effectiveDivision === "All") {
+      return new Set(lotsCol.map((l) => l.doc_id));
+    }
     return new Set(
       lotsCol
         .filter(
@@ -1487,6 +1523,9 @@ export const TempTab: React.FC<TempTabProps> = ({
   }, [activeLoginEmp, scopedLogsBase, scopedDrBase, lotsCol, hybridDivMap, effectiveDivision]);
 
   const scopedHybridsBase = useMemo(() => {
+    if (!activeLoginEmp && effectiveDivision === "All") {
+      return hybridsCol;
+    }
     const referencedHybridIds = new Set(
       lotsCol
         .filter((l) => allowedLotSet.has(l.doc_id) && l.hybrid_id)
@@ -1495,7 +1534,7 @@ export const TempTab: React.FC<TempTabProps> = ({
     return hybridsCol.filter(
       (h) => h.crop_type === effectiveDivision || referencedHybridIds.has(h.doc_id),
     );
-  }, [hybridsCol, lotsCol, allowedLotSet, effectiveDivision]);
+  }, [hybridsCol, lotsCol, allowedLotSet, activeLoginEmp, effectiveDivision]);
 
   const filteredHybrids = useMemo(
     () => filterAndSortDocs(scopedHybridsBase, "hybrids"),
@@ -1514,7 +1553,7 @@ export const TempTab: React.FC<TempTabProps> = ({
 
   const scopedEmployeesBase = useMemo(
     () =>
-      activeLoginEmp
+      activeLoginEmp || effectiveDivision === "All"
         ? employeesCol.filter((e) => allowedEmpSet.has(e.doc_id))
         : employeesCol.filter(
             (e) =>
@@ -1720,7 +1759,7 @@ export const TempTab: React.FC<TempTabProps> = ({
         const expDate = formatCellDate(getVal(row, ["exp_date", "expired", "exp", "kadaluarsa"]));
         const hybrid = String(getVal(row, ["hybrid", "varietas", "material", "produk"]) || "ADV808").trim().toUpperCase();
         const sku = String(getVal(row, ["sku", "kode_sku", "item_code", "material_code"]) || "").trim().toUpperCase();
-        const cropsRaw = String(getVal(row, ["crops", "crop", "division", "divisi"]) || effectiveDivision);
+        const cropsRaw = String(getVal(row, ["crops", "crop", "division", "divisi"]) || defaultStrictDivision);
 
         const ck = cleanForMatch(partnerName);
         const stripped = stripPrefix(partnerName);
@@ -1779,7 +1818,9 @@ export const TempTab: React.FC<TempTabProps> = ({
 
   const handleDownloadDrTemplate = async () => {
     const XLSX = await import("xlsx");
-    const samplePartner = partnersCol.find((p) => p.division_group === effectiveDivision)?.partner_name || "PT KHARISMA EKA PUTRA";
+    const samplePartner =
+      partnersCol.find((p) => effectiveDivision === "All" || p.division_group === effectiveDivision)?.partner_name ||
+      "PT KHARISMA EKA PUTRA";
     const sample = [
       {
         shipping_date: "2026-05-12",
@@ -1788,8 +1829,8 @@ export const TempTab: React.FC<TempTabProps> = ({
         sku: "5 KG",
         exp_date: "2027-05-12",
         shipped_qty_kg: 500,
-        hybrid: effectiveDivision === "Vegetables" ? "LAVANTA" : "ADV808",
-        crops: effectiveDivision,
+        hybrid: defaultStrictDivision === "Vegetables" ? "LAVANTA" : "ADV808",
+        crops: defaultStrictDivision,
       },
     ];
     const wb = XLSX.utils.book_new();
@@ -1915,7 +1956,10 @@ export const TempTab: React.FC<TempTabProps> = ({
       if (!ck) return undefined;
       const stripCorp = (s: string) =>
         cleanForMatch(s).replace(/^(pt|cv|ud|toko|kios|udt|pd)+/, "");
-      const divMatches = partnersCol.filter((p) => p.division_group === effectiveDivision);
+      const divMatches =
+        effectiveDivision === "All"
+          ? partnersCol
+          : partnersCol.filter((p) => p.division_group === effectiveDivision);
       const pool = [...divMatches, ...partnersCol];
       const exact = pool.find((p) => cleanForMatch(p.partner_name) === ck);
       if (exact) return exact;
@@ -1934,9 +1978,12 @@ export const TempTab: React.FC<TempTabProps> = ({
       if (!trimmed) return undefined;
       const ck = cleanForMatch(trimmed);
       if (!ck) return undefined;
-      const divMatches = employeesCol.filter(
-        (e) => e.division_group === effectiveDivision || e.division_group === "All",
-      );
+      const divMatches =
+        effectiveDivision === "All"
+          ? employeesCol
+          : employeesCol.filter(
+              (e) => e.division_group === effectiveDivision || e.division_group === "All",
+            );
       const pool = [...divMatches, ...employeesCol];
       return (
         pool.find((e) => cleanForMatch(e.full_name) === ck) ||
@@ -1951,7 +1998,7 @@ export const TempTab: React.FC<TempTabProps> = ({
       const _draftId = `draft_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 
       if (colKey === "hybrids") {
-        return { _draftId, hybrid_name: "", sku: "", crop_type: effectiveDivision };
+        return { _draftId, hybrid_name: "", sku: "", crop_type: defaultStrictDivision };
       }
       if (colKey === "dr_shipments") {
         const todayDdMmYyyy = new Date().toLocaleDateString("en-GB").split("/").join("");
@@ -1990,13 +2037,17 @@ export const TempTab: React.FC<TempTabProps> = ({
           category: "",
           pic_employee_name: "",
           pic_employee_id: "",
-          division_group: effectiveDivision,
+          division_group: defaultStrictDivision,
           province: availableProvinces[0] || "",
           area: "",
         };
       }
       const defaultUpline =
-        employeesCol.find((e) => e.division_group === effectiveDivision && e.role_level === 2)?.doc_id || "";
+        employeesCol.find(
+          (e) =>
+            (effectiveDivision === "All" || e.division_group === effectiveDivision) &&
+            e.role_level === 2,
+        )?.doc_id || "";
       return {
         _draftId,
         username: "",
@@ -2005,12 +2056,12 @@ export const TempTab: React.FC<TempTabProps> = ({
         position: "Business Solution",
         role_level: 1,
         upline_id: defaultUpline,
-        division_group: effectiveDivision,
+        division_group: defaultStrictDivision,
         province: availableProvinces[0] || "",
         area: "",
       };
     },
-    [employeesCol, effectiveDivision, availableProvinces],
+    [employeesCol, effectiveDivision, defaultStrictDivision, availableProvinces],
   );
 
   const handleAddInlineRows = useCallback(
@@ -2204,7 +2255,7 @@ export const TempTab: React.FC<TempTabProps> = ({
               category: d.category || "R1",
               pic_employee_id: resolvedPicId,
               pic_name: d.pic_employee_name || "",
-              division_group: toStrictDivision(d.division_group || effectiveDivision),
+              division_group: toStrictDivision(d.division_group || defaultStrictDivision),
               province: d.province || "-",
               area: d.area || d.province || "-",
             };
@@ -2221,7 +2272,7 @@ export const TempTab: React.FC<TempTabProps> = ({
             position: d.position || "Business Solution",
             role_level: Number(d.role_level) || 1,
             upline_id: d.upline_id || null,
-            division_group: d.division_group || effectiveDivision,
+            division_group: d.division_group || defaultStrictDivision,
             province: d.province || "-",
             area: d.area || d.province || "-",
             password: d.password || "123",
@@ -2256,7 +2307,7 @@ export const TempTab: React.FC<TempTabProps> = ({
     activeCollection,
     firestoreDataset,
     firebaseUser,
-    effectiveDivision,
+    defaultStrictDivision,
     resolvePartnerByName,
     resolveEmployeeByName,
     reloadFromFirestore,
@@ -2973,7 +3024,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                 category: r.category || "R1",
                 pic_employee_id: resolvedPicId,
                 pic_name: r.pic_employee_name || "",
-                division_group: toStrictDivision(r.division_group || effectiveDivision),
+                division_group: toStrictDivision(r.division_group || defaultStrictDivision),
                 province: r.province || "-",
                 area: r.area || r.province || "-",
               };
@@ -2992,7 +3043,7 @@ export const TempTab: React.FC<TempTabProps> = ({
               upline_id: r.upline_id || null,
               subordinate_ids: r.subordinate_ids || [],
               access_scope_ids: r.access_scope_ids || [],
-              division_group: r.division_group || effectiveDivision,
+              division_group: r.division_group || defaultStrictDivision,
               province: r.province || "-",
               area: r.area || r.province || "-",
               status: r.status || "Aktif",
@@ -3036,7 +3087,7 @@ export const TempTab: React.FC<TempTabProps> = ({
       inlineEdits,
       firestoreDataset,
       firebaseUser,
-      effectiveDivision,
+      defaultStrictDivision,
       resolvePartnerByName,
       resolveEmployeeByName,
       reloadFromFirestore,
@@ -3521,11 +3572,17 @@ export const TempTab: React.FC<TempTabProps> = ({
           >
             {isGlobalBa && (
               <option value="ADMIN_DIV">
-                Admin: Semua Data {effectiveDivision} Saja
+                {effectiveDivision === "All"
+                  ? "Admin: Semua Data (Field Corn & Vegetables)"
+                  : `Admin: Semua Data ${effectiveDivision} Saja`}
               </option>
             )}
             {employeesCol
-              .filter((emp) => emp.division_group === effectiveDivision && emp.role_level < 5)
+              .filter(
+                (emp) =>
+                  (effectiveDivision === "All" || emp.division_group === effectiveDivision) &&
+                  emp.role_level < 5,
+              )
               .sort((a, b) => b.role_level - a.role_level || a.full_name.localeCompare(b.full_name))
               .map((emp) => (
                 <option key={emp.doc_id} value={emp.doc_id}>
@@ -3679,7 +3736,7 @@ export const TempTab: React.FC<TempTabProps> = ({
             {Array.from(
               new Set([
                 ...partnersCol
-                  .filter((p) => p.division_group === effectiveDivision)
+                  .filter((p) => effectiveDivision === "All" || p.division_group === effectiveDivision)
                   .map((p) => p.partner_name),
                 ...partnersCol.map((p) => p.partner_name),
               ]),
@@ -3691,7 +3748,12 @@ export const TempTab: React.FC<TempTabProps> = ({
             {Array.from(
               new Set([
                 ...employeesCol
-                  .filter((e) => e.division_group === effectiveDivision || e.division_group === "All")
+                  .filter(
+                    (e) =>
+                      effectiveDivision === "All" ||
+                      e.division_group === effectiveDivision ||
+                      e.division_group === "All",
+                  )
                   .map((e) => e.full_name),
                 ...employeesCol.map((e) => e.full_name),
               ]),
