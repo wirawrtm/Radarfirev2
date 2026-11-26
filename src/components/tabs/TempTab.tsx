@@ -12,14 +12,12 @@ import {
   bulkAddDrShipmentsFirestore,
   bulkAddEmployeesFirestore,
   bulkAddHybridsFirestore,
-  bulkAddLotsFirestore,
   bulkAddOpnameLogsFirestore,
   bulkAddPartnersFirestore,
   bulkDeleteCollectionDocsFirestore,
   bulkUpdateDrShipmentsFirestore,
   bulkUpdateEmployeesFirestore,
   bulkUpdateHybridsFirestore,
-  bulkUpdateLotsFirestore,
   bulkUpdateOpnameLogsFirestore,
   bulkUpdatePartnersFirestore,
   saveUploadedDrToFirestore,
@@ -75,7 +73,6 @@ export interface TempTabProps {
 type CollectionKey =
   | "opname_logs"
   | "dr_shipments"
-  | "lots"
   | "hybrids"
   | "partners"
   | "employees";
@@ -1114,7 +1111,6 @@ export const TempTab: React.FC<TempTabProps> = ({
         id: l.doc_id,
         name: hybName && hybName !== "-" ? `${l.doc_id} — ${hybName}` : l.doc_id,
         detail,
-        targetCol: "lots",
       };
     });
     mergedDrSales.forEach((d: any) => {
@@ -1490,16 +1486,6 @@ export const TempTab: React.FC<TempTabProps> = ({
     );
   }, [activeLoginEmp, scopedLogsBase, scopedDrBase, lotsCol, hybridDivMap, effectiveDivision]);
 
-  const scopedLotsBase = useMemo(
-    () => lotsCol.filter((l) => allowedLotSet.has(l.doc_id)),
-    [lotsCol, allowedLotSet],
-  );
-
-  const filteredLots = useMemo(
-    () => filterAndSortDocs(scopedLotsBase, "lots"),
-    [scopedLotsBase, filterAndSortDocs],
-  );
-
   const scopedHybridsBase = useMemo(() => {
     const referencedHybridIds = new Set(
       lotsCol
@@ -1546,7 +1532,6 @@ export const TempTab: React.FC<TempTabProps> = ({
   const activeTotalRows = useMemo(() => {
     if (activeCollection === "opname_logs") return filteredLogs.length;
     if (activeCollection === "dr_shipments") return filteredDr.length;
-    if (activeCollection === "lots") return filteredLots.length;
     if (activeCollection === "hybrids") return filteredHybrids.length;
     if (activeCollection === "partners") return filteredPartners.length;
     return filteredEmployees.length;
@@ -1554,7 +1539,6 @@ export const TempTab: React.FC<TempTabProps> = ({
     activeCollection,
     filteredLogs.length,
     filteredDr.length,
-    filteredLots.length,
     filteredHybrids.length,
     filteredPartners.length,
     filteredEmployees.length,
@@ -1589,10 +1573,6 @@ export const TempTab: React.FC<TempTabProps> = ({
     () => filteredDr.slice((currentPage - 1) * pageSize, currentPage * pageSize),
     [filteredDr, currentPage, pageSize],
   );
-  const paginatedLots = useMemo(
-    () => filteredLots.slice((currentPage - 1) * pageSize, currentPage * pageSize),
-    [filteredLots, currentPage, pageSize],
-  );
   const paginatedHybrids = useMemo(
     () => filteredHybrids.slice((currentPage - 1) * pageSize, currentPage * pageSize),
     [filteredHybrids, currentPage, pageSize],
@@ -1611,7 +1591,6 @@ export const TempTab: React.FC<TempTabProps> = ({
     const baseByCol: Record<CollectionKey, Record<string, any>[]> = {
       opname_logs: scopedLogsBase,
       dr_shipments: scopedDrBase,
-      lots: scopedLotsBase,
       hybrids: scopedHybridsBase,
       partners: scopedPartnersBase,
       employees: scopedEmployeesBase,
@@ -1646,7 +1625,6 @@ export const TempTab: React.FC<TempTabProps> = ({
     headerModal,
     scopedLogsBase,
     scopedDrBase,
-    scopedLotsBase,
     scopedHybridsBase,
     scopedPartnersBase,
     scopedEmployeesBase,
@@ -1671,7 +1649,6 @@ export const TempTab: React.FC<TempTabProps> = ({
     return {
       opname_logs: toDocMap(opnameLogsCol, "_key"),
       dr_shipments: toDocMap(drShipmentsCol),
-      lots: toDocMap(lotsCol),
       hybrids: toDocMap(hybridsCol),
       partners: toDocMap(partnersCol),
       employees: toDocMap(employeesCol),
@@ -1679,7 +1656,6 @@ export const TempTab: React.FC<TempTabProps> = ({
   }, [
     opnameLogsCol,
     drShipmentsCol,
-    lotsCol,
     hybridsCol,
     partnersCol,
     employeesCol,
@@ -1855,13 +1831,12 @@ export const TempTab: React.FC<TempTabProps> = ({
 
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(flattenLogsForExcel(opnameLogsCol)), "opname_logs");
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(stripRaw(drShipmentsCol)), "dr_shipments");
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(stripRaw(lotsCol)), "lots");
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(stripRaw(hybridsCol)), "hybrids");
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(stripRaw(partnersCol)), "partners");
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(stripRaw(employeesCol)), "employees");
 
       XLSX.writeFile(wb, `firebase_db_collections_${new Date().toISOString().slice(0, 10)}.xlsx`);
-      showToast("6 Koleksi Database berhasil diunduh (.xlsx).");
+      showToast("5 Koleksi Database berhasil diunduh (.xlsx).");
     } catch {
       showToast("Gagal mengekspor Excel.");
     } finally {
@@ -1874,19 +1849,13 @@ export const TempTab: React.FC<TempTabProps> = ({
       key: "opname_logs",
       count: filteredLogs.length,
       pk: "partner_id + lot_no",
-      fks: "partner_id → partners, lot_no → lots, checker_id → employees · Bulan: apr → mar {in, idle, pog}",
+      fks: "partner_id → partners, checker_id → employees · Bulan: apr → mar {in, idle, pog}",
     },
     {
       key: "dr_shipments",
       count: filteredDr.length,
       pk: "doc_id (DR-xxxx)",
-      fks: "partner_id → partners, lot_no → lots",
-    },
-    {
-      key: "lots",
-      count: filteredLots.length,
-      pk: "doc_id (lot_no)",
-      fks: "hybrid_id → hybrids",
+      fks: "partner_id → partners",
     },
     {
       key: "hybrids",
@@ -1913,7 +1882,6 @@ export const TempTab: React.FC<TempTabProps> = ({
   const [inlineDrafts, setInlineDrafts] = useState<Record<CollectionKey, any[]>>({
     opname_logs: [],
     dr_shipments: [],
-    lots: [],
     hybrids: [],
     partners: [],
     employees: [],
@@ -1981,22 +1949,9 @@ export const TempTab: React.FC<TempTabProps> = ({
   const createEmptyDraftRow = useCallback(
     (colKey: CollectionKey) => {
       const _draftId = `draft_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-      const todayIso = new Date().toISOString().slice(0, 10);
-      const defaultHybridId = hybridsCol[0]?.doc_id || "";
 
       if (colKey === "hybrids") {
         return { _draftId, hybrid_name: "", sku: "", crop_type: effectiveDivision };
-      }
-      if (colKey === "lots") {
-        return {
-          _draftId,
-          lot_no: "",
-          hybrid_id: defaultHybridId,
-          sku: hybridsCol[0]?.sku || "",
-          shipping_date: todayIso,
-          exp_date: "",
-          initial_dr_kg: "0",
-        };
       }
       if (colKey === "dr_shipments") {
         const todayDdMmYyyy = new Date().toLocaleDateString("en-GB").split("/").join("");
@@ -2055,7 +2010,7 @@ export const TempTab: React.FC<TempTabProps> = ({
         area: "",
       };
     },
-    [employeesCol, hybridsCol, effectiveDivision, availableProvinces],
+    [employeesCol, effectiveDivision, availableProvinces],
   );
 
   const handleAddInlineRows = useCallback(
@@ -2077,29 +2032,25 @@ export const TempTab: React.FC<TempTabProps> = ({
         [colKey]: prev[colKey].map((row) => {
           if (row._draftId !== draftId) return row;
           const next = { ...row, ...patch };
-          if ((colKey === "lots" || colKey === "dr_shipments" || colKey === "opname_logs") && typeof patch.lot_no === "string") {
+          if ((colKey === "dr_shipments" || colKey === "opname_logs") && typeof patch.lot_no === "string") {
             const upperLot = patch.lot_no.toUpperCase();
             next.lot_no = upperLot;
             const matchedLot = lotsCol.find((l) => l.doc_id.toUpperCase() === upperLot.trim());
             const prevLotExp = extractExpFromLot(row.lot_no || "");
             if (
-              (colKey === "lots" || colKey === "dr_shipments") &&
+              colKey === "dr_shipments" &&
               (!row.exp_date ||
                 row.exp_date === prevLotExp ||
                 row.exp_date === formatToDDMMYYYY(prevLotExp))
             ) {
               const derived = matchedLot?.exp_date || extractExpFromLot(upperLot);
               if (derived && derived !== "N/A") {
-                next.exp_date = colKey === "dr_shipments" ? formatToDDMMYYYY(derived) : derived;
+                next.exp_date = formatToDDMMYYYY(derived);
               }
             }
             if (!row.sku && matchedLot?.sku) {
               next.sku = matchedLot.sku;
             }
-          }
-          if (colKey === "lots" && typeof patch.hybrid_id === "string" && !row.sku) {
-            const matchedHyb = hybridLookupMap.get(patch.hybrid_id);
-            if (matchedHyb?.sku) next.sku = matchedHyb.sku;
           }
           if (colKey === "employees" && typeof patch.position === "string") {
             next.role_level = getEmployeeLevelFromPos(patch.position);
@@ -2108,7 +2059,7 @@ export const TempTab: React.FC<TempTabProps> = ({
         }),
       }));
     },
-    [lotsCol, hybridLookupMap, getEmployeeLevelFromPos],
+    [lotsCol, getEmployeeLevelFromPos],
   );
 
   const handleUpdateOpnameMonthCell = useCallback(
@@ -2189,19 +2140,6 @@ export const TempTab: React.FC<TempTabProps> = ({
             crop_type: d.crop_type,
           })),
           fsHybrids,
-        );
-      } else if (activeCollection === "lots") {
-        savedCount = await bulkAddLotsFirestore(
-          firebaseUser,
-          drafts.map((d) => ({
-            lot_no: d.lot_no,
-            hybrid_id: d.hybrid_id || null,
-            sku: d.sku || "",
-            shipping_date: d.shipping_date,
-            exp_date: d.exp_date,
-            initial_dr_kg: Number(d.initial_dr_kg) || 0,
-          })),
-          fsLots,
         );
       } else if (activeCollection === "dr_shipments") {
         savedCount = await bulkAddDrShipmentsFirestore(
@@ -2330,7 +2268,6 @@ export const TempTab: React.FC<TempTabProps> = ({
   const [inlineEdits, setInlineEdits] = useState<Record<CollectionKey, Record<string, any>>>({
     opname_logs: {},
     dr_shipments: {},
-    lots: {},
     hybrids: {},
     partners: {},
     employees: {},
@@ -2338,7 +2275,6 @@ export const TempTab: React.FC<TempTabProps> = ({
   const [selectedRowIds, setSelectedRowIds] = useState<Record<CollectionKey, string[]>>({
     opname_logs: [],
     dr_shipments: [],
-    lots: [],
     hybrids: [],
     partners: [],
     employees: [],
@@ -2390,17 +2326,6 @@ export const TempTab: React.FC<TempTabProps> = ({
         _hadSku: Boolean(row.sku),
         exp_date: formatToDDMMYYYY(row.exp_date || ""),
         shipped_qty_kg: String(row.shipped_qty_kg ?? 0),
-      };
-    }
-    if (colKey === "lots") {
-      return {
-        doc_id: row.doc_id,
-        hybrid_id: row.hybrid_id || "",
-        sku: row.sku || "",
-        _hadSku: Boolean(row.sku),
-        shipping_date: row.shipping_date || "",
-        exp_date: row.exp_date || "",
-        initial_dr_kg: String(row.initial_dr_kg ?? 0),
       };
     }
     if (colKey === "hybrids") {
@@ -2497,10 +2422,6 @@ export const TempTab: React.FC<TempTabProps> = ({
             nextRow.sku = matchedLot.sku;
           }
         }
-        if (colKey === "lots" && typeof patch.hybrid_id === "string" && !existingRow.sku) {
-          const matchedHyb = hybridLookupMap.get(patch.hybrid_id);
-          if (matchedHyb?.sku) nextRow.sku = matchedHyb.sku;
-        }
         if (colKey === "employees" && typeof patch.position === "string") {
           nextRow.role_level = getEmployeeLevelFromPos(patch.position);
         }
@@ -2513,7 +2434,7 @@ export const TempTab: React.FC<TempTabProps> = ({
         };
       });
     },
-    [lotsCol, hybridLookupMap, getEmployeeLevelFromPos],
+    [lotsCol, getEmployeeLevelFromPos],
   );
 
   const handleUpdateEditOpnameMonthCell = useCallback(
@@ -2583,11 +2504,6 @@ export const TempTab: React.FC<TempTabProps> = ({
       }
       if (colKey === "dr_shipments") {
         return ["shipping_date", "partner_name", "partner_id", "lot_no", "sku", "exp_date", "shipped_qty_kg"];
-      }
-      if (colKey === "lots") {
-        return mode === "draft"
-          ? ["lot_no", "hybrid_id", "sku", "shipping_date", "exp_date", "initial_dr_kg"]
-          : ["hybrid_id", "sku", "shipping_date", "exp_date", "initial_dr_kg"];
       }
       if (colKey === "hybrids") {
         return ["hybrid_name", "sku", "crop_type"];
@@ -2990,19 +2906,6 @@ export const TempTab: React.FC<TempTabProps> = ({
             })),
             firebaseUser,
           );
-        } else if (colKey === "lots") {
-          updatedCount = await bulkUpdateLotsFirestore(
-            rowsToSave.map((r) => ({
-              doc_id: r.doc_id,
-              hybrid_id: r.hybrid_id || null,
-              sku: r.sku || "",
-              hadSku: Boolean(r._hadSku),
-              shipping_date: r.shipping_date,
-              exp_date: r.exp_date,
-              initial_dr_kg: Number(r.initial_dr_kg) || 0,
-            })),
-            firebaseUser,
-          );
         } else if (colKey === "dr_shipments") {
           updatedCount = await bulkUpdateDrShipmentsFirestore(
             firebaseUser,
@@ -3237,7 +3140,7 @@ export const TempTab: React.FC<TempTabProps> = ({
     );
   };
 
-  const renderFkBadge = (fkId: string | null, targetCol: CollectionKey) => {
+  const renderFkBadge = (fkId: string | null, targetCol?: CollectionKey) => {
     if (!fkId) return <span className="font-mono text-[11px] text-amber-600">null</span>;
     const tip = idTooltipMap[fkId] || fkId;
     const isActive = activeIdTooltip?.id === fkId;
@@ -3602,40 +3505,6 @@ export const TempTab: React.FC<TempTabProps> = ({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {/* 1. Strict Division Group Switcher (Hanya Division Group: Field Corn & Vegetables) */}
-          <div className="flex items-center bg-[#f4f2ff] p-1 rounded-xl border border-[#e0e0fa]">
-            <button
-              type="button"
-              disabled={!isGlobalBa}
-              onClick={() => {
-                setActiveDivision("Field Corn");
-                setSimulatedLoginEmpId("ADMIN_DIV");
-              }}
-              className={`px-3 py-1 rounded-lg text-xs font-mono font-bold transition-colors ${
-                effectiveDivision === "Field Corn"
-                  ? "bg-[#154be2] text-white shadow-sm"
-                  : "text-[#434655] hover:text-[#181a2c]"
-              } ${!isGlobalBa ? "opacity-75 cursor-not-allowed" : "cursor-pointer"}`}
-            >
-              Field Corn
-            </button>
-            <button
-              type="button"
-              disabled={!isGlobalBa}
-              onClick={() => {
-                setActiveDivision("Vegetables");
-                setSimulatedLoginEmpId("ADMIN_DIV");
-              }}
-              className={`px-3 py-1 rounded-lg text-xs font-mono font-bold transition-colors ${
-                effectiveDivision === "Vegetables"
-                  ? "bg-emerald-600 text-white shadow-sm"
-                  : "text-[#434655] hover:text-[#181a2c]"
-              } ${!isGlobalBa ? "opacity-75 cursor-not-allowed" : "cursor-pointer"}`}
-            >
-              Vegetables
-            </button>
-          </div>
-
           {/* 2. Hierarchy Login Scope Selector (Locked to active user unless Global BA) */}
           <select
             disabled={!isGlobalBa}
@@ -3750,7 +3619,7 @@ export const TempTab: React.FC<TempTabProps> = ({
         </div>
       </div>
 
-      {/* Collection Selector Tabs (7 Normalized Collections) */}
+      {/* Collection Selector Tabs (5 Normalized Collections) */}
       <div className="flex flex-wrap items-center justify-between gap-2 bg-white p-1.5 rounded-2xl border border-[#e0e0fa]">
         <div className="flex flex-wrap items-center gap-1.5">
           {collectionsMeta.map((c) => (
@@ -3938,13 +3807,11 @@ export const TempTab: React.FC<TempTabProps> = ({
                             ? filteredLogs
                             : activeCollection === "dr_shipments"
                               ? filteredDr
-                              : activeCollection === "lots"
-                                ? filteredLots
-                                : activeCollection === "hybrids"
-                                  ? filteredHybrids
-                                  : activeCollection === "partners"
-                                    ? filteredPartners
-                                    : filteredEmployees;
+                              : activeCollection === "hybrids"
+                                ? filteredHybrids
+                                : activeCollection === "partners"
+                                  ? filteredPartners
+                                  : filteredEmployees;
                         handleStartEditSelected(activeCollection, visible);
                       }}
                       className="h-8 px-3 rounded-lg bg-white border border-indigo-300 hover:bg-indigo-100 text-primary font-mono text-[11px] font-bold cursor-pointer flex items-center gap-1"
@@ -4449,7 +4316,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                             {renderFkBadge(l.partner_id, "partners")}
                           </td>
                           <td className="py-2.5 px-3 whitespace-nowrap">
-                            {renderFkBadge(l.lot_no, "lots")}
+                            {renderFkBadge(l.lot_no)}
                           </td>
                           <td className="py-2.5 px-3 font-semibold text-[#181a2c] whitespace-nowrap">
                             {l.sku || "-"}
@@ -4904,7 +4771,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                           <td className="py-2.5 px-4 text-[#434655]">{d.shipping_date}</td>
                           <td className="py-2.5 px-4 font-sans font-semibold text-[#181a2c]">{d.partner_name || "-"}</td>
                           <td className="py-2.5 px-4">{renderFkBadge(d.partner_id, "partners")}</td>
-                          <td className="py-2.5 px-4">{renderFkBadge(d.lot_no, "lots")}</td>
+                          <td className="py-2.5 px-4">{renderFkBadge(d.lot_no)}</td>
                           <td className="py-2.5 px-4 font-semibold text-[#181a2c]">{d.sku || "-"}</td>
                           <td className="py-2.5 px-4 text-[#434655]">{d.exp_date || "null"}</td>
                           <td className="py-2.5 px-4 text-right tabular-nums font-bold">
@@ -4938,317 +4805,7 @@ export const TempTab: React.FC<TempTabProps> = ({
               </div>
             )}
 
-            {/* 4. lots */}
-            {activeCollection === "lots" && (
-              <table className="w-full text-left border-collapse font-mono text-xs">
-                <thead>
-                  <tr className="border-b border-[#e0e0fa] bg-[#f4f2ff]/60">
-                    <th className="py-2 px-3 align-top w-8">
-                      <input
-                        type="checkbox"
-                        checked={
-                          paginatedLots.length > 0 &&
-                          paginatedLots.every((r) => selectedRowIds.lots.includes(r.doc_id))
-                        }
-                        onChange={() =>
-                          handleToggleSelectAllVisible(
-                            "lots",
-                            paginatedLots.map((r) => r.doc_id),
-                          )
-                        }
-                        className="cursor-pointer accent-[#154be2]"
-                      />
-                    </th>
-                    {renderHeaderCell("lots", "doc_id", "doc_id / lot_no (PK)")}
-                    {renderHeaderCell("lots", "hybrid_id", "hybrid_id (FK)")}
-                    {renderHeaderCell("lots", "sku", "sku")}
-                    {renderHeaderCell("lots", "shipping_date", "shipping_date")}
-                    {renderHeaderCell("lots", "exp_date", "exp_date")}
-                    {renderHeaderCell("lots", "initial_dr_kg", "initial_dr_kg", "right")}
-                    <th className="py-2 px-4 text-right align-top font-bold text-[11px] text-[#434655]">
-                      actions
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[#f1f0fa] text-[#181a2c]">
-                  {inlineDrafts.lots.map((d, draftIdx) => (
-                    <tr key={d._draftId} className="bg-emerald-50/45 border-b border-emerald-200/70">
-                      <td className="py-2 px-3 text-[10px] font-bold text-emerald-700">+</td>
-                      <td className="py-2 px-3">
-                        <input
-                          type="text"
-                          value={d.lot_no}
-                          onPaste={(e) => handlePasteDraftCells("lots", draftIdx, "lot_no", e)}
-                          onChange={(e) =>
-                            handleUpdateInlineDraft("lots", d._draftId, {
-                              lot_no: e.target.value,
-                            })
-                          }
-                          placeholder="Nomor Lot*"
-                          className="h-8 w-36 bg-white border border-emerald-300 focus:border-primary rounded-lg px-2 text-[11px] font-bold uppercase outline-none"
-                        />
-                      </td>
-                      <td className="py-2 px-3">
-                        <select
-                          value={d.hybrid_id}
-                          onPaste={(e) => handlePasteDraftCells("lots", draftIdx, "hybrid_id", e, true)}
-                          onChange={(e) =>
-                            handleUpdateInlineDraft("lots", d._draftId, {
-                              hybrid_id: e.target.value,
-                            })
-                          }
-                          className="h-8 w-48 bg-white border border-emerald-300 focus:border-primary rounded-lg px-2 text-[11px] font-semibold outline-none"
-                        >
-                          <option value="">-- Tanpa Hybrid --</option>
-                          {hybridsCol.map((h) => (
-                            <option key={h.doc_id} value={h.doc_id}>
-                              {h.doc_id} · {h.hybrid_name} ({h.crop_type})
-                            </option>
-                          ))}
-                        </select>
-                      </td>
-                      <td className="py-2 px-3">
-                        <input
-                          type="text"
-                          value={d.sku || ""}
-                          onPaste={(e) => handlePasteDraftCells("lots", draftIdx, "sku", e)}
-                          onChange={(e) =>
-                            handleUpdateInlineDraft("lots", d._draftId, {
-                              sku: e.target.value.toUpperCase(),
-                            })
-                          }
-                          placeholder="SKU"
-                          className="h-8 w-28 bg-white border border-emerald-300 focus:border-primary rounded-lg px-2 text-[11px] font-bold uppercase outline-none"
-                        />
-                      </td>
-                      <td className="py-2 px-3">
-                        <input
-                          type="text"
-                          maxLength={8}
-                          value={formatToDDMMYYYY(d.shipping_date)}
-                          onPaste={(e) => handlePasteDraftCells("lots", draftIdx, "shipping_date", e)}
-                          onChange={(e) =>
-                            handleUpdateInlineDraft("lots", d._draftId, {
-                              shipping_date: e.target.value,
-                            })
-                          }
-                          placeholder="DDMMYYYY"
-                          className="h-8 w-28 bg-white border border-emerald-300 focus:border-primary rounded-lg px-2 text-[11px] font-mono font-semibold outline-none"
-                        />
-                      </td>
-                      <td className="py-2 px-3">
-                        <input
-                          type="text"
-                          value={d.exp_date}
-                          onPaste={(e) => handlePasteDraftCells("lots", draftIdx, "exp_date", e)}
-                          onChange={(e) =>
-                            handleUpdateInlineDraft("lots", d._draftId, {
-                              exp_date: e.target.value,
-                            })
-                          }
-                          placeholder="YYYY-MM-DD"
-                          className="h-8 w-28 bg-white border border-emerald-300 focus:border-primary rounded-lg px-2 text-[11px] font-semibold outline-none"
-                        />
-                      </td>
-                      <td className="py-2 px-3 text-right">
-                        <input
-                          type="text"
-                          value={d.initial_dr_kg}
-                          onPaste={(e) => handlePasteDraftCells("lots", draftIdx, "initial_dr_kg", e)}
-                          onChange={(e) =>
-                            handleUpdateInlineDraft("lots", d._draftId, {
-                              initial_dr_kg: e.target.value,
-                            })
-                          }
-                          className="h-8 w-24 bg-white border border-emerald-300 focus:border-primary rounded-lg px-2 text-[11px] font-bold text-right outline-none"
-                        />
-                      </td>
-                      <td className="py-2 px-4 text-right whitespace-nowrap font-sans">
-                        <div className="inline-flex items-center gap-1">
-                          <button
-                            type="button"
-                            onClick={() => handleDuplicateInlineDraft("lots", d)}
-                            className="px-2 py-1 rounded bg-white border border-emerald-300 hover:bg-emerald-100 text-emerald-800 text-[10px] font-bold cursor-pointer"
-                          >
-                            Copy
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleRemoveInlineDraft("lots", d._draftId)}
-                            className="px-2 py-1 rounded bg-red-50 hover:bg-red-100 text-red-600 text-[10px] font-bold cursor-pointer"
-                          >
-                            ✕
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                  {paginatedLots.map((l, rowIdx) => {
-                    const editRow = inlineEdits.lots[l.doc_id];
-                    const isChecked = selectedRowIds.lots.includes(l.doc_id);
-                    if (editRow) {
-                      return (
-                        <tr key={l.doc_id} className="bg-indigo-50/55 border-b border-indigo-200">
-                          <td className="py-2 px-3">
-                            <input
-                              type="checkbox"
-                              checked={isChecked}
-                              onChange={() => handleToggleSelectRow("lots", l.doc_id)}
-                              className="cursor-pointer accent-[#154be2]"
-                            />
-                          </td>
-                          <td className="py-2 px-4 font-bold text-primary">{l.doc_id}</td>
-                          <td className="py-2 px-3">
-                            <select
-                              value={editRow.hybrid_id}
-                              onPaste={(e) =>
-                                handlePasteEditCells("lots", paginatedLots, rowIdx, "hybrid_id", e, true)
-                              }
-                              onChange={(e) =>
-                                handleUpdateEditField("lots", l.doc_id, {
-                                  hybrid_id: e.target.value,
-                                })
-                              }
-                              className="h-8 w-48 bg-white border border-indigo-300 focus:border-primary rounded-lg px-2 text-[11px] font-semibold outline-none"
-                            >
-                              <option value="">-- Tanpa Hybrid --</option>
-                              {hybridsCol.map((h) => (
-                                <option key={h.doc_id} value={h.doc_id}>
-                                  {h.doc_id} · {h.hybrid_name} ({h.crop_type})
-                                </option>
-                              ))}
-                            </select>
-                          </td>
-                          <td className="py-2 px-3">
-                            <input
-                              type="text"
-                              value={editRow.sku || ""}
-                              onPaste={(e) =>
-                                handlePasteEditCells("lots", paginatedLots, rowIdx, "sku", e)
-                              }
-                              onChange={(e) =>
-                                handleUpdateEditField("lots", l.doc_id, {
-                                  sku: e.target.value.toUpperCase(),
-                                })
-                              }
-                              placeholder="SKU"
-                              className="h-8 w-28 bg-white border border-indigo-300 focus:border-primary rounded-lg px-2 text-[11px] font-bold uppercase outline-none"
-                            />
-                          </td>
-                          <td className="py-2 px-3">
-                            <input
-                              type="text"
-                              maxLength={8}
-                              value={formatToDDMMYYYY(editRow.shipping_date)}
-                              onPaste={(e) =>
-                                handlePasteEditCells("lots", paginatedLots, rowIdx, "shipping_date", e)
-                              }
-                              onChange={(e) =>
-                                handleUpdateEditField("lots", l.doc_id, {
-                                  shipping_date: e.target.value,
-                                })
-                              }
-                              placeholder="DDMMYYYY"
-                              className="h-8 w-28 bg-white border border-indigo-300 focus:border-primary rounded-lg px-2 text-[11px] font-mono font-semibold outline-none"
-                            />
-                          </td>
-                          <td className="py-2 px-3">
-                            <input
-                              type="text"
-                              value={editRow.exp_date}
-                              onPaste={(e) =>
-                                handlePasteEditCells("lots", paginatedLots, rowIdx, "exp_date", e)
-                              }
-                              onChange={(e) =>
-                                handleUpdateEditField("lots", l.doc_id, {
-                                  exp_date: e.target.value,
-                                })
-                              }
-                              placeholder="YYYY-MM-DD"
-                              className="h-8 w-28 bg-white border border-indigo-300 focus:border-primary rounded-lg px-2 text-[11px] font-semibold outline-none"
-                            />
-                          </td>
-                          <td className="py-2 px-3 text-right">
-                            <input
-                              type="text"
-                              value={editRow.initial_dr_kg}
-                              onPaste={(e) =>
-                                handlePasteEditCells("lots", paginatedLots, rowIdx, "initial_dr_kg", e)
-                              }
-                              onChange={(e) =>
-                                handleUpdateEditField("lots", l.doc_id, {
-                                  initial_dr_kg: e.target.value,
-                                })
-                              }
-                              className="h-8 w-24 bg-white border border-indigo-300 focus:border-primary rounded-lg px-2 text-[11px] font-bold text-right outline-none"
-                            />
-                          </td>
-                          <td className="py-2 px-4 text-right whitespace-nowrap font-sans">
-                            <div className="inline-flex items-center gap-1">
-                              <button
-                                type="button"
-                                disabled={isSavingEdits}
-                                onClick={() => handleSaveEditedRows("lots", [l.doc_id])}
-                                className="px-2 py-1 rounded bg-[#154be2] hover:bg-[#154be2]/90 text-white text-[10px] font-bold cursor-pointer disabled:opacity-50"
-                              >
-                                Simpan
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => handleCancelEditRow("lots", l.doc_id)}
-                                className="px-2 py-1 rounded bg-white border border-slate-200 hover:bg-slate-100 text-[#434655] text-[10px] font-semibold cursor-pointer"
-                              >
-                                Batal
-                              </button>
-                            </div>
-                          </td>
-                        </tr>
-                      );
-                    }
-                    return (
-                      <tr key={l.doc_id} className={`hover:bg-[#f4f2ff]/30 ${isChecked ? "bg-indigo-50/30" : ""}`}>
-                        <td className="py-2.5 px-3">
-                          <input
-                            type="checkbox"
-                            checked={isChecked}
-                            onChange={() => handleToggleSelectRow("lots", l.doc_id)}
-                            className="cursor-pointer accent-[#154be2]"
-                          />
-                        </td>
-                        <td className="py-2.5 px-4 font-bold">{renderPkBadge(l.doc_id, "lots")}</td>
-                        <td className="py-2.5 px-4">{renderFkBadge(l.hybrid_id, "hybrids")}</td>
-                        <td className="py-2.5 px-4 font-semibold text-[#181a2c]">{l.sku || "-"}</td>
-                        <td className="py-2.5 px-4 text-[#434655]">{l.shipping_date || "null"}</td>
-                        <td className="py-2.5 px-4 text-[#434655]">{l.exp_date || "null"}</td>
-                        <td className="py-2.5 px-4 text-right tabular-nums font-bold">
-                          {l.initial_dr_kg}
-                        </td>
-                        <td className="py-2.5 px-4 text-right whitespace-nowrap font-sans">
-                          <div className="inline-flex items-center gap-1.5">
-                            <button
-                              type="button"
-                              onClick={() => handleStartEditRow("lots", l)}
-                              className="px-2 py-0.5 rounded bg-[#f4f2ff] hover:bg-[#e6e6ff] text-primary text-[11px] font-semibold cursor-pointer"
-                            >
-                              Edit
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleRequestDeleteRows("lots", [l.doc_id], [l.doc_id])}
-                              className="px-2 py-0.5 rounded bg-red-50 hover:bg-red-100 text-red-600 text-[11px] font-semibold cursor-pointer"
-                            >
-                              Del
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            )}
-
-            {/* 5. hybrids */}
+            {/* 4. hybrids */}
             {activeCollection === "hybrids" && (
               <table className="w-full text-left border-collapse font-mono text-xs">
                 <thead>

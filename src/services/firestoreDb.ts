@@ -1086,8 +1086,15 @@ export async function saveAccessRulesFirestore(
 ): Promise<void> {
   const ownerUid = user?.uid || "public";
   const existing = await getExistingDocIds("access_rules", user);
-  const ops = Object.entries(rules).map(([position, perms]) => {
+  const targetDocIds = new Set<string>();
+  const ops: Array<{
+    type: "create" | "update" | "delete";
+    colName: string;
+    docId: string;
+    data?: Record<string, any>;
+  }> = Object.entries(rules).map(([position, perms]) => {
     const docId = toValidDocId(position, "ROLE");
+    targetDocIds.add(docId);
     return {
       type: existing.has(docId) ? ("update" as const) : ("create" as const),
       colName: "access_rules",
@@ -1106,6 +1113,17 @@ export async function saveAccessRulesFirestore(
       },
     };
   });
+
+  existing.forEach((existingDocId) => {
+    if (!existingDocId.startsWith("SKU_") && !targetDocIds.has(existingDocId)) {
+      ops.push({
+        type: "delete",
+        colName: "access_rules",
+        docId: existingDocId,
+      });
+    }
+  });
+
   await commitInChunks(ops, 15);
 }
 

@@ -52,6 +52,7 @@ interface OverviewTabProps {
     materials: string[];
     teams: string[];
     areas: string[];
+    distributors: string[];
   };
   overviewStats: {
     totalKiosks: number;
@@ -100,6 +101,12 @@ interface OverviewTabProps {
     idle: number;
     pog: number;
   }>;
+  historyFilterArea: string;
+  setHistoryFilterArea: (v: string) => void;
+  historyFilterDistributor: string;
+  setHistoryFilterDistributor: (v: string) => void;
+  historyFilterHybrid: string;
+  setHistoryFilterHybrid: (v: string) => void;
   filteredSummaryDataLength: number;
   grandTotalViewBy: "hybrid" | "area";
   setGrandTotalViewBy: (v: "hybrid" | "area") => void;
@@ -167,6 +174,12 @@ export default function OverviewTab({
   setOverviewMetricFilter,
   employeePerformanceData,
   overviewHistoryData,
+  historyFilterArea,
+  setHistoryFilterArea,
+  historyFilterDistributor,
+  setHistoryFilterDistributor,
+  historyFilterHybrid,
+  setHistoryFilterHybrid,
   filteredSummaryDataLength,
   grandTotalViewBy,
   setGrandTotalViewBy,
@@ -1311,74 +1324,175 @@ export default function OverviewTab({
 
       {/* Section: History Bulanan */}
       <div className="bg-white p-6 rounded-[24px] shadow-[0_12px_32px_rgba(21,75,226,0.03)] border border-[#154be2]/5 flex flex-col justify-between mt-6">
-        <div className="flex flex-col md:flex-row md:items-center md:justify-between mb-6 pb-4 border-b border-[#f0effc]/60 gap-4">
-          <div>
-            <div className="flex items-center gap-2">
-              <span className="material-symbols-outlined text-primary text-sm font-semibold border-b border-primary/20 pb-0.5">
+        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between mb-4 pb-4 border-b border-[#f0effc]/80 gap-4">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2.5">
+              <span className="material-symbols-outlined size-7 rounded-lg bg-[#154be2]/10 text-[#154be2] text-[16px] inline-flex items-center justify-center shrink-0">
                 timeline
               </span>
-              <h3 className="text-xs font-bold text-[#181a2c] tracking-tight">
+              <h3 className="text-sm font-bold text-[#181a2c] tracking-tight">
                 Tren Perkembangan Data (History Bulanan)
               </h3>
             </div>
-            <p className="text-[10px] text-[#8E94B7] mt-0.5">
+            <p className="text-[11px] text-[#8E94B7] mt-1 leading-relaxed">
               Analisis perbandingan histori total volume perkembangan data dari
               bulan ke bulan
             </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-1.5 self-start md:self-auto">
+          <div className="inline-flex flex-wrap items-center gap-1 bg-[#fbfaff] p-1 rounded-xl border border-[#e2e8f0]/80 self-start lg:self-auto shrink-0">
             <button
+              type="button"
               onClick={() => setHistoryChartType("opening")}
-              className={`px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all ${
+              className={`px-3 py-1.5 rounded-lg text-[10.5px] font-bold whitespace-nowrap transition-all cursor-pointer ${
                 historyChartType === "opening"
-                  ? "bg-indigo-600 text-white shadow-md"
-                  : "bg-[#fbfaff] text-[#8E94B7] hover:bg-slate-100 border border-slate-100/40"
+                  ? "bg-indigo-600 text-white shadow-sm"
+                  : "text-[#64748b] hover:text-[#181a2c] hover:bg-white"
               }`}
             >
               Opening Inv
             </button>
             <button
+              type="button"
               onClick={() => setHistoryChartType("ending")}
-              className={`px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all ${
+              className={`px-3 py-1.5 rounded-lg text-[10.5px] font-bold whitespace-nowrap transition-all cursor-pointer ${
                 historyChartType === "ending"
-                  ? "bg-purple-600 text-white shadow-md"
-                  : "bg-[#fbfaff] text-[#8E94B7] hover:bg-slate-100 border border-slate-100/40"
+                  ? "bg-purple-600 text-white shadow-sm"
+                  : "text-[#64748b] hover:text-[#181a2c] hover:bg-white"
               }`}
             >
               Ending Inv
             </button>
             <button
+              type="button"
               onClick={() => setHistoryChartType("stockIn")}
-              className={`px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all ${
+              className={`px-3 py-1.5 rounded-lg text-[10.5px] font-bold whitespace-nowrap transition-all cursor-pointer ${
                 historyChartType === "stockIn"
-                  ? "bg-emerald-600 text-white shadow-md"
-                  : "bg-[#fbfaff] text-[#8E94B7] hover:bg-slate-100 border border-slate-100/40"
+                  ? "bg-emerald-600 text-white shadow-sm"
+                  : "text-[#64748b] hover:text-[#181a2c] hover:bg-white"
               }`}
             >
               Stock In
             </button>
             <button
+              type="button"
               onClick={() => setHistoryChartType("idle")}
-              className={`px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all ${
+              className={`px-3 py-1.5 rounded-lg text-[10.5px] font-bold whitespace-nowrap transition-all cursor-pointer ${
                 historyChartType === "idle"
-                  ? "bg-amber-600 text-white shadow-md"
-                  : "bg-[#fbfaff] text-[#8E94B7] hover:bg-slate-100 border border-slate-100/40"
+                  ? "bg-amber-600 text-white shadow-sm"
+                  : "text-[#64748b] hover:text-[#181a2c] hover:bg-white"
               }`}
             >
               Idle Stock
             </button>
             <button
+              type="button"
               onClick={() => setHistoryChartType("pog")}
-              className={`px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all ${
+              className={`px-3 py-1.5 rounded-lg text-[10.5px] font-bold whitespace-nowrap transition-all cursor-pointer ${
                 historyChartType === "pog"
-                  ? "bg-blue-600 text-white shadow-md"
-                  : "bg-[#fbfaff] text-[#8E94B7] hover:bg-slate-100 border border-slate-100/40"
+                  ? "bg-blue-600 text-white shadow-sm"
+                  : "text-[#64748b] hover:text-[#181a2c] hover:bg-white"
               }`}
             >
               POG
             </button>
           </div>
+        </div>
+
+        {/* Filter History Bulanan: Area, Distributor, Hybrid */}
+        <div className="flex flex-col sm:flex-row sm:items-center gap-2.5 mb-5">
+          <div className="flex-1 grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+            <div className="flex items-center gap-2.5 h-9 bg-[#fbfaff] px-3 rounded-xl border border-[#e2e8f0]/80 hover:border-[#154be2]/30 transition-colors min-w-0">
+              <span className="text-[10px] font-bold text-[#8E94B7] uppercase tracking-wider shrink-0">
+                Area
+              </span>
+              <div className="relative flex-1 min-w-0 pl-2.5 border-l border-[#e2e8f0]/80">
+                <select
+                  aria-label="Filter Area History Bulanan"
+                  value={historyFilterArea}
+                  onChange={(e) => setHistoryFilterArea(e.target.value)}
+                  className="w-full bg-transparent text-[11px] font-bold text-[#154be2] focus:outline-none focus:ring-0 appearance-none cursor-pointer pr-5 py-0.5 truncate"
+                >
+                  <option value="All">Semua Area</option>
+                  {filterOptions.areas.map((a) => (
+                    <option key={a} value={a}>
+                      {a}
+                    </option>
+                  ))}
+                </select>
+                <span className="material-symbols-outlined absolute right-0 top-1/2 -translate-y-1/2 text-[15px] text-primary pointer-events-none">
+                  expand_more
+                </span>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2.5 h-9 bg-[#fbfaff] px-3 rounded-xl border border-[#e2e8f0]/80 hover:border-[#154be2]/30 transition-colors min-w-0">
+              <span className="text-[10px] font-bold text-[#8E94B7] uppercase tracking-wider shrink-0">
+                Distributor
+              </span>
+              <div className="relative flex-1 min-w-0 pl-2.5 border-l border-[#e2e8f0]/80">
+                <select
+                  aria-label="Filter Distributor History Bulanan"
+                  value={historyFilterDistributor}
+                  onChange={(e) => setHistoryFilterDistributor(e.target.value)}
+                  className="w-full bg-transparent text-[11px] font-bold text-[#154be2] focus:outline-none focus:ring-0 appearance-none cursor-pointer pr-5 py-0.5 truncate"
+                >
+                  <option value="All">Semua Distributor</option>
+                  {(filterOptions.distributors || []).map((d) => (
+                    <option key={d} value={d}>
+                      {d}
+                    </option>
+                  ))}
+                </select>
+                <span className="material-symbols-outlined absolute right-0 top-1/2 -translate-y-1/2 text-[15px] text-primary pointer-events-none">
+                  expand_more
+                </span>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2.5 h-9 bg-[#fbfaff] px-3 rounded-xl border border-[#e2e8f0]/80 hover:border-[#154be2]/30 transition-colors min-w-0">
+              <span className="text-[10px] font-bold text-[#8E94B7] uppercase tracking-wider shrink-0">
+                Hybrid
+              </span>
+              <div className="relative flex-1 min-w-0 pl-2.5 border-l border-[#e2e8f0]/80">
+                <select
+                  aria-label="Filter Hybrid History Bulanan"
+                  value={historyFilterHybrid}
+                  onChange={(e) => setHistoryFilterHybrid(e.target.value)}
+                  className="w-full bg-transparent text-[11px] font-bold text-[#154be2] focus:outline-none focus:ring-0 appearance-none cursor-pointer pr-5 py-0.5 truncate"
+                >
+                  <option value="All">Semua Hybrid</option>
+                  {filterOptions.materials.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                </select>
+                <span className="material-symbols-outlined absolute right-0 top-1/2 -translate-y-1/2 text-[15px] text-primary pointer-events-none">
+                  expand_more
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {(historyFilterArea !== "All" ||
+            historyFilterDistributor !== "All" ||
+            historyFilterHybrid !== "All") && (
+            <button
+              type="button"
+              onClick={() => {
+                setHistoryFilterArea("All");
+                setHistoryFilterDistributor("All");
+                setHistoryFilterHybrid("All");
+              }}
+              className="h-9 px-3 rounded-xl text-[10.5px] font-bold text-rose-600 bg-rose-50 hover:bg-rose-100 border border-rose-200/70 transition-colors cursor-pointer shrink-0 inline-flex items-center justify-center gap-1"
+            >
+              <span className="material-symbols-outlined text-[14px]">
+                restart_alt
+              </span>
+              Reset Filter
+            </button>
+          )}
         </div>
 
         {overviewHistoryData && overviewHistoryData.length > 0 && (

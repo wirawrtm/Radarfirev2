@@ -7,7 +7,14 @@ import { FirebaseProvider } from './contexts/FirebaseContext.tsx';
 import './index.css';
 
 if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
-  registerSW({ immediate: true });
+  if (import.meta.env.PROD) {
+    registerSW({ immediate: true });
+  } else {
+    navigator.serviceWorker
+      .getRegistrations()
+      .then((regs) => regs.forEach((reg) => reg.unregister()))
+      .catch(() => {});
+  }
 }
 
 createRoot(document.getElementById('root')!).render(

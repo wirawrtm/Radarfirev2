@@ -24,6 +24,7 @@ interface PartnerTabProps {
   mappingPic: string;
   setMappingPic: (v: string) => void;
   mappingCategories: string[];
+  mappingCategoryCounts?: Record<string, number>;
   mappingCategory: string;
   setMappingCategory: (v: string) => void;
   displayedPartnerChannels: any[];
@@ -69,6 +70,7 @@ export default function PartnerTab({
   mappingPic,
   setMappingPic,
   mappingCategories,
+  mappingCategoryCounts = {},
   mappingCategory,
   setMappingCategory,
   displayedPartnerChannels,
@@ -476,20 +478,54 @@ export default function PartnerTab({
             </div>
           )}
 
-          <div className="mb-6 flex gap-2 overflow-x-auto pb-2 -mx-1 px-1 custom-scrollbar">
-            {mappingCategories.map((cat) => (
-              <button
-                key={cat}
-                onClick={() => setMappingCategory(cat)}
-                className={`whitespace-nowrap px-4 py-2 rounded-full font-semibold text-[10.5px] uppercase tracking-wide transition-all ${
-                  mappingCategory === cat
-                    ? "bg-gradient-to-r from-primary to-cyan-400 text-white shadow-[0_4px_12px_rgba(21,75,226,0.2)]"
-                    : "bg-[#f4f2ff] text-[#8E94B7] hover:bg-[#edecff]"
-                }`}
-              >
-                {cat}
-              </button>
-            ))}
+          <div className="mb-6 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex gap-2 overflow-x-auto pb-1 -mx-1 px-1 custom-scrollbar">
+              {mappingCategories.map((cat) => (
+                <button
+                  key={cat}
+                  onClick={() => setMappingCategory(cat)}
+                  className={`whitespace-nowrap px-4 py-2 rounded-full font-semibold text-[10.5px] uppercase tracking-wide transition-all cursor-pointer ${
+                    mappingCategory === cat
+                      ? "bg-gradient-to-r from-primary to-cyan-400 text-white shadow-[0_4px_12px_rgba(21,75,226,0.2)]"
+                      : "bg-[#f4f2ff] text-[#8E94B7] hover:bg-[#edecff]"
+                  }`}
+                >
+                  {cat}
+                </button>
+              ))}
+            </div>
+
+            {mappingCategories.length > 0 && (
+              <div className="flex flex-wrap items-center sm:justify-end gap-1.5 shrink-0">
+                {mappingCategories.map((cat) => {
+                  const count = mappingCategoryCounts[cat] ?? 0;
+                  const isSelected = mappingCategory === cat;
+                  return (
+                    <button
+                      key={`total-${cat}`}
+                      type="button"
+                      onClick={() => setMappingCategory(cat)}
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl border text-[10px] font-bold transition-all cursor-pointer ${
+                        isSelected
+                          ? "bg-[#154be2]/10 border-[#154be2]/30 text-[#154be2]"
+                          : "bg-white border-[#edecff] text-[#434655] hover:border-[#154be2]/20"
+                      }`}
+                    >
+                      <span className="uppercase tracking-wider">{cat}</span>
+                      <span
+                        className={`px-1.5 py-0.5 rounded-md text-[9.5px] font-extrabold ${
+                          isSelected
+                            ? "bg-[#154be2] text-white"
+                            : "bg-[#f4f2ff] text-[#154be2]"
+                        }`}
+                      >
+                        {count}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           <div className="mb-4 flex items-center justify-between bg-white px-5 py-3.5 rounded-[20px] shadow-sm border border-[#edecff]">

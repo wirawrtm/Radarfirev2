@@ -9,7 +9,12 @@ import React, {
 } from "react";
 import { AdvantaLogo } from "../AdvantaLogo";
 import { UserIcon } from "../UserIcon";
-import { SCRIPT_URL, INDO_MONTHS } from "../utils/constants";
+import {
+  SCRIPT_URL,
+  INDO_MONTHS,
+  DEFAULT_ACCESS_RULES,
+  DEFAULT_POSITIONS,
+} from "../utils/constants";
 import { customFetch } from "../utils/api";
 import {
   cleanForMatch,
@@ -63,13 +68,15 @@ import {
   withTimeout,
 } from "../utils/offlineQueue";
 
-const OverviewTab = lazy(() => import("./tabs/OverviewTab"));
-const HomeTab = lazy(() => import("./tabs/HomeTab"));
-const PartnerTab = lazy(() => import("./tabs/PartnerTab"));
-const StockSummaryTab = lazy(() => import("./tabs/StockSummaryTab"));
-const PogTab = lazy(() => import("./tabs/PogTab"));
-const AccessTab = lazy(() => import("./tabs/AccessTab"));
-const TempTab = lazy(() => import("./tabs/TempTab"));
+import { lazyWithRetry } from "../utils/lazyWithRetry";
+
+const OverviewTab = lazyWithRetry(() => import("./tabs/OverviewTab"));
+const HomeTab = lazyWithRetry(() => import("./tabs/HomeTab"));
+const PartnerTab = lazyWithRetry(() => import("./tabs/PartnerTab"));
+const StockSummaryTab = lazyWithRetry(() => import("./tabs/StockSummaryTab"));
+const PogTab = lazyWithRetry(() => import("./tabs/PogTab"));
+const AccessTab = lazyWithRetry(() => import("./tabs/AccessTab"));
+const TempTab = lazyWithRetry(() => import("./tabs/TempTab"));
 
 const Dashboard = ({
   userData,
@@ -103,6 +110,9 @@ const Dashboard = ({
   const [historyChartType, setHistoryChartType] = useState<
     "opening" | "ending" | "stockIn" | "idle" | "pog"
   >("pog");
+  const [historyFilterArea, setHistoryFilterArea] = useState<string>("All");
+  const [historyFilterDistributor, setHistoryFilterDistributor] = useState<string>("All");
+  const [historyFilterHybrid, setHistoryFilterHybrid] = useState<string>("All");
 
   const handleFullscreen = () => {
     try {
@@ -474,69 +484,93 @@ const Dashboard = ({
   // Access Rules
   const [isSavingAccess, setIsSavingAccess] = useState(false);
   const [accessSaveSuccess, setAccessSaveSuccess] = useState(false);
+  const [accessSaveError, setAccessSaveError] = useState<string | null>(null);
 
-  const handleSaveAccessRules = async () => {
+  const allPositionsList = useMemo(() => {
+    const seen = new Set<string>();
+    const result: string[] = [];
+    const addPos = (rawPos: string) => {
+      const trimmed = String(rawPos || "").trim();
+      if (!trimmed || trimmed === "Sales Manager" || trimmed === "Unknown") return;
+      const clean = cleanForMatch(trimmed);
+      if (!seen.has(clean)) {
+        seen.add(clean);
+        result.push(trimmed);
+      }
+    };
+
+    Object.keys(accessRules || {}).forEach(addPos);
+    activeEmployees.forEach((emp: any) => {
+      if (emp?.position) addPos(normalizePosition(emp.position));
+    });
+
+    if (result.length === 0) {
+      DEFAULT_POSITIONS.forEach(addPos);
+    }
+    return result;
+  }, [accessRules, activeEmployees]);
+
+  const handleSaveAccessRules = async (
+    rulesOverride?: Record<string, Record<string, boolean>>,
+  ) => {
     setIsSavingAccess(true);
+    setAccessSaveError(null);
+    setAccessSaveSuccess(false);
+
+    const sourceRules = rulesOverride || accessRules || {};
     const filteredRules: Record<string, Record<string, boolean>> = {};
-    allPositionsList.forEach(pos => {
-      if (accessRules[pos]) {
-        filteredRules[pos] = {
-          home: !!accessRules[pos].home,
-          partner: !!accessRules[pos].partner,
-          stock: !!accessRules[pos].stock,
-          pog: !!accessRules[pos].pog,
-          overview: !!accessRules[pos].overview,
-          temp: !!accessRules[pos].temp,
-          access: !!accessRules[pos].access,
+    const targetPositions = rulesOverride
+      ? Object.keys(rulesOverride)
+      : allPositionsList;
+
+    targetPositions.forEach((pos) => {
+      const cleanPos = String(pos || "").trim();
+      if (!cleanPos) return;
+      const row = sourceRules[pos] || DEFAULT_ACCESS_RULES[cleanPos];
+      if (row) {
+        filteredRules[cleanPos] = {
+          home: !!row.home,
+          partner: !!row.partner,
+          stock: !!row.stock,
+          pog: !!row.pog,
+          overview: !!row.overview,
+          temp: !!row.temp,
+          access: !!row.access,
         };
       } else {
-        filteredRules[pos] = {
+        filteredRules[cleanPos] = {
           home: true,
           partner: true,
           stock: true,
           pog: true,
-          overview: pos === "Business Analyst",
-          temp: pos === "Business Analyst",
-          access: pos === "Business Analyst"
+          overview: cleanPos === "Business Analyst",
+          temp: cleanPos === "Business Analyst",
+          access: cleanPos === "Business Analyst",
         };
       }
     });
 
     try {
-      localStorage.setItem('appAccessRules', JSON.stringify(filteredRules));
-      setAccessRules(filteredRules);
-    } catch (e) {
-      console.error('Failed to save access rules', e);
-    }
-    try {
       await saveAccessRulesFirestore(firebaseUser, filteredRules);
-      await reloadFromFirestore();
+      try {
+        localStorage.setItem("appAccessRules", JSON.stringify(filteredRules));
+      } catch (e) {
+        console.error("Failed to cache access rules", e);
+      }
+      setAccessRules(filteredRules);
+      await reloadFromFirestore({ forceFull: true });
       setAccessSaveSuccess(true);
+      setTimeout(() => setAccessSaveSuccess(false), 3500);
     } catch (err: any) {
       console.error("Error saving access rules:", err);
-      alert(err?.message || "Gagal menyimpan aturan akses ke Firestore.");
+      setAccessSaveError(
+        err?.message ||
+          "Gagal menyimpan aturan akses ke database. Periksa koneksi atau izin akses Anda.",
+      );
     } finally {
       setIsSavingAccess(false);
-      setTimeout(() => setAccessSaveSuccess(false), 3000);
     }
   };
-
-  const allPositionsList = useMemo(() => {
-    const list = Object.keys(accessRules || {});
-    // Clean up obsolete 'Sales Manager'
-    const filteredList = list.filter(p => p !== "Sales Manager");
-    const defaults = [
-      "Business Analyst",
-      "Vegetables Sales Manager",
-      "Area Sales Manager",
-      "Sales Agronomist",
-      "Business Solution"
-    ];
-    defaults.forEach(d => {
-      if (!filteredList.includes(d)) filteredList.push(d);
-    });
-    return filteredList;
-  }, [accessRules]);
 
   const removeAccessRule = (position: string) => {
     setAccessRules((prev: Record<string, Record<string, boolean>>) => {
@@ -548,42 +582,25 @@ const Dashboard = ({
 
   const toggleAccessRule = (position: string, page: string) => {
     setAccessRules((prev: Record<string, Record<string, boolean>>) => {
-      const currentRules = prev[position] || {
-        home: true,
-        partner: true,
-        stock: true,
-        pog: true,
-        overview: false,
-        temp: false,
-        access: false
-      };
+      const currentRules =
+        prev[position] ||
+        DEFAULT_ACCESS_RULES[position] || {
+          home: true,
+          partner: true,
+          stock: true,
+          pog: true,
+          overview: false,
+          temp: false,
+          access: false,
+        };
       return {
         ...prev,
         [position]: {
           ...currentRules,
-          [page]: !currentRules[page]
-        }
+          [page]: !currentRules[page],
+        },
       };
     });
-  };
-
-  const renderAccessCheckbox = (position: string, page: string) => {
-    const isChecked = !!accessRules[position]?.[page];
-    return (
-      <button 
-        onClick={() => toggleAccessRule(position, page)}
-        className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-1 rounded-full border uppercase tracking-wide transition-colors ${
-          isChecked 
-            ? "text-emerald-600 bg-emerald-50 border-emerald-200 hover:bg-emerald-100 cursor-pointer" 
-            : "text-slate-400 bg-slate-50 border-slate-200 hover:bg-slate-100 cursor-pointer"
-        }`}
-      >
-        <span className="material-symbols-outlined text-[12px]">
-          {isChecked ? "check_circle" : "cancel"}
-        </span> 
-        {isChecked ? "Yes" : "No"}
-      </button>
-    );
   };
 
   // State Tab Temp (Temporary Review Page)
@@ -2825,6 +2842,15 @@ const Dashboard = ({
     });
   }, [mappedChannelsByPic]);
 
+  const mappingCategoryCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    mappedChannelsByPic.forEach((k) => {
+      const cat = String(k.category || "Uncategorized").trim();
+      counts[cat] = (counts[cat] || 0) + 1;
+    });
+    return counts;
+  }, [mappedChannelsByPic]);
+
   const allCategories = useMemo(() => {
     const rawCats = [
       ...new Set<string>(
@@ -3283,12 +3309,31 @@ const Dashboard = ({
     }
     const areas = Array.from(areasSet).filter(Boolean).sort();
 
+    const distributorsSet = new Set<string>();
+    scopedKiosks.forEach((k) => {
+      const cat = getValidCategory(k.category, undefined, k.name, workingCategoryMap);
+      if (cleanForMatch(cat) === "distributor" && k.name) {
+        distributorsSet.add(String(k.name).trim());
+      }
+    });
+    rawData.forEach((d) => {
+      const cleanKName = cleanForMatch(d.kiosk);
+      const kInfo = scopedKiosks.find((k) => cleanForMatch(k.name) === cleanKName) || {};
+      const cat = getValidCategory(d.category, kInfo.category, d.kiosk, workingCategoryMap);
+      const partnerName = String(kInfo.name || d.kiosk || "").trim();
+      if (cleanForMatch(cat) === "distributor" && partnerName) {
+        distributorsSet.add(partnerName);
+      }
+    });
+    const distributors = Array.from(distributorsSet).filter(Boolean).sort();
+
     return {
       months,
       channels,
       materials,
       teams,
       areas,
+      distributors,
     };
   }, [
     scopedRawWorkingData,
@@ -3429,6 +3474,28 @@ const Dashboard = ({
       ) {
         return false;
       }
+      if (
+        historyFilterArea &&
+        historyFilterArea !== "All" &&
+        cleanForMatch(item.area) !== cleanForMatch(historyFilterArea)
+      ) {
+        return false;
+      }
+      if (
+        historyFilterDistributor &&
+        historyFilterDistributor !== "All" &&
+        (cleanForMatch(item.category) !== "distributor" ||
+          cleanForMatch(item.kiosk) !== cleanForMatch(historyFilterDistributor))
+      ) {
+        return false;
+      }
+      if (
+        historyFilterHybrid &&
+        historyFilterHybrid !== "All" &&
+        cleanForMatch(item.hybrid) !== cleanForMatch(historyFilterHybrid)
+      ) {
+        return false;
+      }
       return true;
     });
 
@@ -3494,6 +3561,9 @@ const Dashboard = ({
     filterBelowTeam,
     filterBelowArea,
     filterBelowCrop,
+    historyFilterArea,
+    historyFilterDistributor,
+    historyFilterHybrid,
   ]);
 
   const overviewStats = useMemo(() => {
@@ -5898,6 +5968,21 @@ const Dashboard = ({
         },
       },
       {
+        key: "Area Sales Manager" as const,
+        label: "Area Sales Manager",
+        fallback: {
+          name: "Area Sales Manager",
+          user: "areasalesmanager",
+          email: "areasalesmanager",
+          position: "Area Sales Manager",
+          level: "3",
+          group: "Field Corn",
+          province: "-",
+          area: "-",
+          upline: "-",
+        },
+      },
+      {
         key: "Sales Agronomist" as const,
         label: "Sales Agronomist",
         fallback: {
@@ -5958,6 +6043,13 @@ const Dashboard = ({
             lvl === "4"
           );
         }
+        if (roleKey === "Area Sales Manager") {
+          return (
+            posClean.includes("areasalesmanager") ||
+            posClean === "asm" ||
+            lvl === "3"
+          );
+        }
         if (roleKey === "Sales Agronomist") {
           return posClean.includes("salesagronomist") || lvl === "2";
         }
@@ -5996,6 +6088,9 @@ const Dashboard = ({
       (posClean.includes("salesmanager") && !posClean.includes("area"))
     ) {
       return "Commercial Lead";
+    }
+    if (posClean.includes("areasalesmanager") || posClean === "asm") {
+      return "Area Sales Manager";
     }
     if (posClean.includes("salesagronomist")) {
       return "Sales Agronomist";
@@ -6207,12 +6302,6 @@ const Dashboard = ({
                         ? userData.position
                         : "Akses Terbuka · Edit Aktif"}
                     </span>
-                    {!userData?.isPublic && userData?.user && (
-                      <>
-                        <span aria-hidden="true" className="text-white/50">·</span>
-                        <span className="font-mono text-white/90">@{userData.user}</span>
-                      </>
-                    )}
                     {!userData?.isPublic && userData?.province && userData.province !== "-" && (
                       <>
                         <span aria-hidden="true" className="text-white/50">·</span>
@@ -6279,24 +6368,29 @@ const Dashboard = ({
                 )}
               </div>
 
-              <div className="flex flex-wrap items-center gap-1 bg-white/15 p-1 rounded-xl border border-white/20 backdrop-blur-sm">
-                {SHORTCUT_ROLES.map((role) => {
-                  const isActive = activeShortcutRole === role.key;
-                  return (
-                    <button
-                      key={role.key}
-                      type="button"
-                      onClick={() => handleShortcutRoleClick(role.key)}
-                      className={`px-2.5 py-1.5 rounded-lg text-[11px] font-semibold transition-all whitespace-nowrap cursor-pointer ${
-                        isActive
-                          ? "bg-white text-[#154be2] shadow-sm"
-                          : "text-white/90 hover:bg-white/15 hover:text-white"
-                      }`}
-                    >
-                      {role.label}
-                    </button>
-                  );
-                })}
+              <div className="flex items-center gap-1.5 w-full lg:w-auto">
+                <select
+                  aria-label="Pilih Role Shortcut"
+                  value={activeShortcutRole || "__PUBLIC__"}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    if (val === "__PUBLIC__") {
+                      handleResetToPublicViewer();
+                      return;
+                    }
+                    handleShortcutRoleClick(
+                      val as (typeof SHORTCUT_ROLES)[number]["key"],
+                    );
+                  }}
+                  className="h-8 w-full lg:w-64 bg-white/95 hover:bg-white text-[#181a2c] text-[11px] font-semibold rounded-lg px-2.5 border border-white/40 shadow-sm outline-none cursor-pointer truncate"
+                >
+                  <option value="__PUBLIC__">Pilih Role · Semua Akses</option>
+                  {SHORTCUT_ROLES.map((role) => (
+                    <option key={role.key} value={role.key}>
+                      Role · {role.label}
+                    </option>
+                  ))}
+                </select>
               </div>
 
               <div className="flex items-center gap-1.5 w-full lg:w-auto">
@@ -6530,6 +6624,12 @@ const Dashboard = ({
             setOverviewMetricFilter={setOverviewMetricFilter}
             employeePerformanceData={employeePerformanceData}
             overviewHistoryData={overviewHistoryData}
+            historyFilterArea={historyFilterArea}
+            setHistoryFilterArea={setHistoryFilterArea}
+            historyFilterDistributor={historyFilterDistributor}
+            setHistoryFilterDistributor={setHistoryFilterDistributor}
+            historyFilterHybrid={historyFilterHybrid}
+            setHistoryFilterHybrid={setHistoryFilterHybrid}
             filteredSummaryDataLength={filteredSummaryData.length}
             grandTotalViewBy={grandTotalViewBy}
             setGrandTotalViewBy={setGrandTotalViewBy}
@@ -6596,6 +6696,7 @@ const Dashboard = ({
             mappingPic={mappingPic}
             setMappingPic={setMappingPic}
             mappingCategories={mappingCategories}
+            mappingCategoryCounts={mappingCategoryCounts}
             mappingCategory={mappingCategory}
             setMappingCategory={setMappingCategory}
             displayedPartnerChannels={displayedPartnerChannels}
@@ -6694,9 +6795,12 @@ const Dashboard = ({
           <AccessTab
             allPositionsList={allPositionsList}
             accessRules={accessRules}
+            employees={activeEmployees}
             toggleAccessRule={toggleAccessRule}
             removeAccessRule={removeAccessRule}
             accessSaveSuccess={accessSaveSuccess}
+            accessSaveError={accessSaveError}
+            onClearAccessSaveError={() => setAccessSaveError(null)}
             handleSaveAccessRules={handleSaveAccessRules}
             isSavingAccess={isSavingAccess}
           />

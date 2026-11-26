@@ -248,7 +248,13 @@ export class ErrorOverlay {}
         },
       }),
     );
-    app.get("*", (_req, res) => {
+    app.get("*", (req, res) => {
+      if (
+        req.path.startsWith("/assets/") ||
+        /\.(js|mjs|ts|tsx|css|map|json|svg|png|ico|woff2?)$/i.test(req.path)
+      ) {
+        return res.status(404).end();
+      }
       res.setHeader("Cache-Control", "no-cache");
       res.sendFile(path.join(distPath, "index.html"));
     });
