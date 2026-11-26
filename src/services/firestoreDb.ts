@@ -2873,7 +2873,7 @@ export async function bulkUpdateOpnameLogsFirestore(
 
   if (logOps.length === 0) throw new Error("Nomor Lot wajib diisi pada Opname Log yang diedit.");
   if (newLotOps.size > 0) await commitInChunks(Array.from(newLotOps.values()), 15);
-  await commitInChunks(logOps, 10);
+  await commitInChunks(logOps, 6);
   if (skuOpsMap.size > 0) await commitInChunks(Array.from(skuOpsMap.values()), 15);
   return logOps.length;
 }

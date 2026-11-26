@@ -663,11 +663,26 @@ export function buildNormalizedCollections(params: {
   });
 
   // 6. OPNAME_LOGS
+  const empByIdForLogs = new Map<string, EmployeeFsDoc>(empDocs.map((e) => [e.doc_id, e]));
+  const isSalesAgronomistEmp = (e?: EmployeeFsDoc | null) =>
+    Boolean(e && String(e.position || "").toLowerCase().includes("sales agronomist"));
+  const resolveSaCheckerId = (empId: string | null | undefined): string | null => {
+    let cur = empId ? empByIdForLogs.get(empId) : undefined;
+    const seen = new Set<string>();
+    while (cur && !seen.has(cur.doc_id)) {
+      seen.add(cur.doc_id);
+      if (isSalesAgronomistEmp(cur)) return cur.doc_id;
+      cur = cur.upline_id ? empByIdForLogs.get(cur.upline_id) : undefined;
+    }
+    return empId || null;
+  };
+
   const invMap = new Map<
     string,
     {
       partner_id: string | null;
       lot_no: string;
+      sku: string;
       last_checker_id: string | null;
       stock_qty_kg: number;
       _mVals: number[];
@@ -681,7 +696,15 @@ export function buildNormalizedCollections(params: {
     const partnerName = String(item.kiosk || item.channel || item.toko || "").trim();
     const rawLotId = toValidDocId(String(item.lot || "").trim().toUpperCase(), "");
     if (!rawLotId || !cleanForMatch(rawLotId)) return;
-    const canonicalLot = lotMap.get(cleanForMatch(rawLotId))?.doc_id || rawLotId;
+    const matchedLot = lotMap.get(cleanForMatch(rawLotId));
+    const canonicalLot = matchedLot?.doc_id || rawLotId;
+    const matchedHybrid = matchedLot?.hybrid_id
+      ? hybridDocs.find((h) => h.doc_id === matchedLot.hybrid_id)
+      : undefined;
+    const itemSku = clampStr(
+      String(item.sku || matchedLot?.sku || matchedHybrid?.sku || "").trim().toUpperCase(),
+      80,
+    );
     const rawCheckerName = String(item.user || item.pic || item.checker || "").trim();
     const checkerName = resolvePicAliasName(rawCheckerName);
     const checker = resolveEmpDoc(checkerName, String(item.crops || "").trim());
@@ -691,11 +714,15 @@ export function buildNormalizedCollections(params: {
       checker,
       String(item.area || item.province || ""),
     );
+    const saCheckerId =
+      resolveSaCheckerId(checker?.doc_id) ||
+      resolveSaCheckerId(partner?.pic_employee_id) ||
+      null;
 
     const mVals = Array(12).fill(0);
     const mHas = Array(12).fill(false);
     const mUpd = Array(12).fill("");
-    const mChk = Array<string | null>(12).fill(checker ? checker.doc_id : null);
+    const mChk = Array<string | null>(12).fill(saCheckerId);
 
     CROP_YEAR_ORDER.forEach((mIdx) => {
       const mKey = MONTH_KEYS[mIdx];
@@ -713,7 +740,7 @@ export function buildNormalizedCollections(params: {
     });
 
     const prtKeyPart = partner ? partner.doc_id : toValidDocId(partnerName, "NO_PRT");
-    const chkKeyPart = checker ? checker.doc_id : toValidDocId(checkerName, "NO_CHK");
+    const chkKeyPart = saCheckerId ? saCheckerId : toValidDocId(checkerName, "NO_CHK");
     const uqKey = toValidDocId(
       `${prtKeyPart}_${canonicalLot}_${chkKeyPart}_FY2026`,
       padFsId("LOG", invMap.size + 1, 4),
@@ -724,7 +751,8 @@ export function buildNormalizedCollections(params: {
       invMap.set(uqKey, {
         partner_id: partner ? partner.doc_id : null,
         lot_no: canonicalLot,
-        last_checker_id: checker ? checker.doc_id : null,
+        sku: itemSku,
+        last_checker_id: saCheckerId,
         stock_qty_kg: Number.isFinite(rawStock) && rawStock > 0 ? rawStock : 0,
         _mVals: mVals,
         _mHas: mHas,
@@ -732,6 +760,7 @@ export function buildNormalizedCollections(params: {
         _mCheckerId: mChk,
       });
     } else {
+      if (!existing.sku && itemSku) existing.sku = itemSku;
       for (let m = 0; m < 12; m++) {
         if (mHas[m]) {
           const bothPositiveSales =
@@ -800,6 +829,7 @@ export function buildNormalizedCollections(params: {
       _key: docId,
       partner_id: inv.partner_id,
       lot_no: inv.lot_no,
+      sku: inv.sku || null,
       checker_id: inv.last_checker_id,
       crop_year: "FY2026",
       apr: monthCells.apr,

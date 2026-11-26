@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import { cleanForMatch, extractExpFromLot, getValidCategory } from "../../utils/formatters";
-import { checkIsBusinessAnalyst } from "../../utils/hierarchy";
+import { checkIsBusinessAnalyst, normalizePosition } from "../../utils/hierarchy";
 import { MONTH_KEYS } from "../../utils/constants";
 import { PartnerEditModal } from "../modals/PartnerEditModal";
 import { PartnerDeleteModal } from "../modals/PartnerDeleteModal";
@@ -1948,6 +1948,121 @@ export const TempTab: React.FC<TempTabProps> = ({
     [hybridsCol],
   );
 
+  // Referensi dari tabel lain untuk opname_logs
+  const opnamePartnerOptions = useMemo(() => {
+    const scopedIds = new Set(scopedPartnersBase.map((p) => p.doc_id));
+    const sortFn = (a: (typeof partnersCol)[number], b: (typeof partnersCol)[number]) =>
+      a.partner_name.localeCompare(b.partner_name, undefined, { sensitivity: "base" });
+    const primary = [...scopedPartnersBase].sort(sortFn);
+    const secondary = partnersCol.filter((p) => !scopedIds.has(p.doc_id)).sort(sortFn);
+    const map = new Map(partnersCol.map((p) => [p.doc_id, p]));
+    return { primary, secondary, map };
+  }, [scopedPartnersBase, partnersCol]);
+
+  const opnameLotOptions = useMemo(() => {
+    const merged = new Map<
+      string,
+      { lot_no: string; hybrid_name: string; sku: string }
+    >();
+    lotsCol.forEach((l) => {
+      const lotNo = String(l.doc_id || "").trim().toUpperCase();
+      if (!lotNo) return;
+      const hyb = l.hybrid_id ? hybridLookupMap.get(l.hybrid_id) : undefined;
+      merged.set(lotNo, {
+        lot_no: lotNo,
+        hybrid_name: hyb?.hybrid_name || "",
+        sku: String(l.sku || hyb?.sku || "").trim().toUpperCase(),
+      });
+    });
+    drShipmentsCol.forEach((d) => {
+      const lotNo = String(d.lot_no || "").trim().toUpperCase();
+      if (!lotNo) return;
+      const cur = merged.get(lotNo);
+      const skuVal = String(d.sku || "").trim().toUpperCase();
+      if (!cur) {
+        merged.set(lotNo, { lot_no: lotNo, hybrid_name: "", sku: skuVal });
+      } else if (!cur.sku && skuVal) {
+        cur.sku = skuVal;
+      }
+    });
+    opnameLogsCol.forEach((l) => {
+      const lotNo = String(l.lot_no || "").trim().toUpperCase();
+      if (!lotNo) return;
+      const cur = merged.get(lotNo);
+      const skuVal = String(l.sku || "").trim().toUpperCase();
+      if (!cur) {
+        merged.set(lotNo, { lot_no: lotNo, hybrid_name: "", sku: skuVal });
+      } else if (!cur.sku && skuVal) {
+        cur.sku = skuVal;
+      }
+    });
+    const list = Array.from(merged.values()).sort((a, b) =>
+      a.lot_no.localeCompare(b.lot_no, undefined, { numeric: true, sensitivity: "base" }),
+    );
+    const map = new Map(list.map((item) => [item.lot_no, item]));
+    return { list, map };
+  }, [lotsCol, drShipmentsCol, opnameLogsCol, hybridLookupMap]);
+
+  const opnameSkuOptions = useMemo(() => {
+    const skuSet = new Set<string>();
+    hybridsCol.forEach((h) => {
+      const s = String(h.sku || "").trim().toUpperCase();
+      if (s) skuSet.add(s);
+    });
+    lotsCol.forEach((l) => {
+      const s = String(l.sku || "").trim().toUpperCase();
+      if (s) skuSet.add(s);
+    });
+    drShipmentsCol.forEach((d) => {
+      const s = String(d.sku || "").trim().toUpperCase();
+      if (s) skuSet.add(s);
+    });
+    opnameLogsCol.forEach((l) => {
+      const s = String(l.sku || "").trim().toUpperCase();
+      if (s) skuSet.add(s);
+    });
+    return Array.from(skuSet).sort((a, b) =>
+      a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }),
+    );
+  }, [hybridsCol, lotsCol, drShipmentsCol, opnameLogsCol]);
+
+  const salesAgronomistOptions = useMemo(() => {
+    const isSa = (e: (typeof employeesCol)[number]) => {
+      const norm = normalizePosition(e.position);
+      const clean = cleanForMatch(e.position);
+      return norm === "Sales Agronomist" || clean.includes("salesagronomist");
+    };
+    const allSa = employeesCol
+      .filter(isSa)
+      .sort((a, b) => {
+        const activeDiff =
+          (a.status === "Nonaktif" ? 1 : 0) - (b.status === "Nonaktif" ? 1 : 0);
+        if (activeDiff !== 0) return activeDiff;
+        return a.full_name.localeCompare(b.full_name, undefined, { sensitivity: "base" });
+      });
+    const primary =
+      effectiveDivision === "All"
+        ? allSa
+        : allSa.filter(
+            (e) => e.division_group === effectiveDivision || e.division_group === "All",
+          );
+    const primaryIds = new Set(primary.map((e) => e.doc_id));
+    const secondary = allSa.filter((e) => !primaryIds.has(e.doc_id));
+    const saMap = new Map(allSa.map((e) => [e.doc_id, e]));
+    return { all: allSa, primary, secondary, saMap };
+  }, [employeesCol, effectiveDivision]);
+
+  const opnameCropYearOptions = useMemo(() => {
+    const years = new Set<string>(["FY2024", "FY2025", "FY2026", "FY2027", "FY2028"]);
+    opnameLogsCol.forEach((l) => {
+      const cy = String(l.crop_year || "").trim();
+      if (cy) years.add(cy);
+    });
+    return Array.from(years).sort((a, b) =>
+      a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }),
+    );
+  }, [opnameLogsCol]);
+
   const resolvePartnerByName = useCallback(
     (rawName: string) => {
       const trimmed = String(rawName || "").trim();
@@ -1991,6 +2106,22 @@ export const TempTab: React.FC<TempTabProps> = ({
       );
     },
     [employeesCol, effectiveDivision],
+  );
+
+  const resolveCheckerByName = useCallback(
+    (rawName: string) => {
+      const trimmed = String(rawName || "").trim();
+      if (!trimmed) return undefined;
+      const ck = cleanForMatch(trimmed);
+      if (!ck) return undefined;
+      const pool = [...salesAgronomistOptions.primary, ...salesAgronomistOptions.secondary];
+      const saMatch =
+        pool.find((e) => e.doc_id.toUpperCase() === trimmed.toUpperCase()) ||
+        pool.find((e) => cleanForMatch(e.full_name) === ck) ||
+        pool.find((e) => cleanForMatch(e.username) === ck);
+      return saMatch || resolveEmployeeByName(rawName);
+    },
+    [salesAgronomistOptions, resolveEmployeeByName],
   );
 
   const createEmptyDraftRow = useCallback(
@@ -2099,8 +2230,9 @@ export const TempTab: React.FC<TempTabProps> = ({
                 next.exp_date = formatToDDMMYYYY(derived);
               }
             }
-            if (!row.sku && matchedLot?.sku) {
-              next.sku = matchedLot.sku;
+            if (patch.sku === undefined && !row.sku) {
+              const refSku = matchedLot?.sku || opnameLotOptions.map.get(upperLot.trim())?.sku;
+              if (refSku) next.sku = refSku;
             }
           }
           if (colKey === "employees" && typeof patch.position === "string") {
@@ -2110,7 +2242,7 @@ export const TempTab: React.FC<TempTabProps> = ({
         }),
       }));
     },
-    [lotsCol, getEmployeeLevelFromPos],
+    [lotsCol, opnameLotOptions.map, getEmployeeLevelFromPos],
   );
 
   const handleUpdateOpnameMonthCell = useCallback(
@@ -2231,7 +2363,7 @@ export const TempTab: React.FC<TempTabProps> = ({
             const resolvedPrtId =
               d.partner_id || resolvePartnerByName(d.partner_name || "")?.doc_id || null;
             const resolvedChkId =
-              d.checker_id || resolveEmployeeByName(d.checker_name || "")?.doc_id || null;
+              d.checker_id || resolveCheckerByName(d.checker_name || "")?.doc_id || null;
             return {
               partner_id: resolvedPrtId,
               lot_no: d.lot_no,
@@ -2310,6 +2442,7 @@ export const TempTab: React.FC<TempTabProps> = ({
     defaultStrictDivision,
     resolvePartnerByName,
     resolveEmployeeByName,
+    resolveCheckerByName,
     reloadFromFirestore,
     showToast,
   ]);
@@ -2455,6 +2588,25 @@ export const TempTab: React.FC<TempTabProps> = ({
     [selectedRowIds, buildEditRowDraft],
   );
 
+  const handleStartEditRows = useCallback(
+    (colKey: CollectionKey, targetRows: any[]) => {
+      if (!targetRows || targetRows.length === 0) return;
+      setEditError(null);
+      setViewMode("table");
+      setInlineEdits((prev) => {
+        const nextCol = { ...prev[colKey] };
+        targetRows.forEach((row) => {
+          const docId = String(row.doc_id || row._key || "");
+          if (docId && !nextCol[docId]) {
+            nextCol[docId] = buildEditRowDraft(colKey, row);
+          }
+        });
+        return { ...prev, [colKey]: nextCol };
+      });
+    },
+    [buildEditRowDraft],
+  );
+
   const handleUpdateEditField = useCallback(
     (colKey: CollectionKey, docId: string, patch: Record<string, any>) => {
       setInlineEdits((prev) => {
@@ -2469,8 +2621,9 @@ export const TempTab: React.FC<TempTabProps> = ({
             const derived = matchedLot?.exp_date || extractExpFromLot(upperLot);
             if (derived && derived !== "N/A") nextRow.exp_date = formatToDDMMYYYY(derived);
           }
-          if (!existingRow.sku && matchedLot?.sku) {
-            nextRow.sku = matchedLot.sku;
+          if (patch.sku === undefined && !existingRow.sku) {
+            const refSku = matchedLot?.sku || opnameLotOptions.map.get(upperLot.trim())?.sku;
+            if (refSku) nextRow.sku = refSku;
           }
         }
         if (colKey === "employees" && typeof patch.position === "string") {
@@ -2485,7 +2638,7 @@ export const TempTab: React.FC<TempTabProps> = ({
         };
       });
     },
-    [lotsCol, getEmployeeLevelFromPos],
+    [lotsCol, opnameLotOptions.map, getEmployeeLevelFromPos],
   );
 
   const handleUpdateEditOpnameMonthCell = useCallback(
@@ -2634,6 +2787,17 @@ export const TempTab: React.FC<TempTabProps> = ({
     [employeesCol, empByClean],
   );
 
+  const resolveCheckerIdFromPaste = useCallback(
+    (raw: string): string => {
+      const trimmed = String(raw || "").trim();
+      if (!trimmed) return "";
+      const saMatch = resolveCheckerByName(trimmed);
+      if (saMatch) return saMatch.doc_id;
+      return resolveEmployeeIdFromPaste(trimmed);
+    },
+    [resolveCheckerByName, resolveEmployeeIdFromPaste],
+  );
+
   const applyPastedCellsToRow = useCallback(
     (
       colKey: CollectionKey,
@@ -2671,17 +2835,19 @@ export const TempTab: React.FC<TempTabProps> = ({
         }
 
         if (field === "partner_name") {
-          next.partner_name = rawVal;
-          if (!touchedFields.has("partner_id")) {
-            next.partner_id = resolvePartnerIdFromPaste(rawVal);
-          }
+          const matchedPrtId = resolvePartnerIdFromPaste(rawVal);
+          next.partner_id = matchedPrtId;
+          next.partner_name = matchedPrtId ? partnerById.get(matchedPrtId)?.partner_name || rawVal : rawVal;
         } else if (field === "partner_id") {
-          next.partner_id = resolvePartnerIdFromPaste(rawVal);
-        } else if (field === "checker_name") {
-          next.checker_name = rawVal;
-          if (!touchedFields.has("checker_id")) {
-            next.checker_id = resolveEmployeeIdFromPaste(rawVal);
+          const matchedPrtId = resolvePartnerIdFromPaste(rawVal);
+          next.partner_id = matchedPrtId;
+          if (!touchedFields.has("partner_name") && matchedPrtId) {
+            next.partner_name = partnerById.get(matchedPrtId)?.partner_name || next.partner_name;
           }
+        } else if (field === "checker_name") {
+          const matchedChkId = resolveCheckerIdFromPaste(rawVal);
+          next.checker_id = matchedChkId;
+          next.checker_name = matchedChkId ? empById.get(matchedChkId)?.full_name || rawVal : rawVal;
         } else if (field === "pic_employee_name") {
           next.pic_employee_name = rawVal;
           if (!touchedFields.has("pic_employee_id")) {
@@ -2693,23 +2859,31 @@ export const TempTab: React.FC<TempTabProps> = ({
             const hyb = hybridLookupMap.get(next.hybrid_id);
             if (hyb?.sku) next.sku = hyb.sku;
           }
-        } else if (field === "checker_id" || field === "pic_employee_id" || field === "upline_id") {
+        } else if (field === "checker_id") {
+          const matchedChkId = resolveCheckerIdFromPaste(rawVal);
+          next.checker_id = matchedChkId;
+          if (!touchedFields.has("checker_name") && matchedChkId) {
+            next.checker_name = empById.get(matchedChkId)?.full_name || next.checker_name;
+          }
+        } else if (field === "pic_employee_id" || field === "upline_id") {
           next[field] = resolveEmployeeIdFromPaste(rawVal);
         } else if (field === "lot_no") {
           const upperLot = rawVal.toUpperCase();
           next.lot_no = upperLot;
           const matchedLot = lotLookupMap.get(upperLot);
+          const refLot = opnameLotOptions.map.get(upperLot);
           if (!touchedFields.has("exp_date") && !next.exp_date) {
             const derived = matchedLot?.exp_date || extractExpFromLot(upperLot);
             if (derived && derived !== "N/A") {
               next.exp_date = colKey === "dr_shipments" ? formatToDDMMYYYY(derived) : derived;
             }
           }
-          if (!touchedFields.has("sku") && !next.sku && matchedLot?.sku) {
-            next.sku = matchedLot.sku;
+          if (!touchedFields.has("sku") && !next.sku) {
+            const refSku = matchedLot?.sku || refLot?.sku;
+            if (refSku) next.sku = refSku;
           }
         } else if (field === "sku") {
-          next.sku = rawVal.slice(0, 80);
+          next.sku = rawVal.toUpperCase().slice(0, 80);
         } else if (field === "hybrid_name") {
           next.hybrid_name = rawVal.toUpperCase();
         } else if (field === "shipping_date" || field === "exp_date") {
@@ -2746,8 +2920,12 @@ export const TempTab: React.FC<TempTabProps> = ({
       resolvePartnerIdFromPaste,
       resolveHybridIdFromPaste,
       resolveEmployeeIdFromPaste,
+      resolveCheckerIdFromPaste,
+      partnerById,
+      empById,
       hybridLookupMap,
       lotLookupMap,
+      opnameLotOptions.map,
       getEmployeeLevelFromPos,
     ],
   );
@@ -2999,7 +3177,7 @@ export const TempTab: React.FC<TempTabProps> = ({
               const resolvedPrtId =
                 r.partner_id || resolvePartnerByName(r.partner_name || "")?.doc_id || null;
               const resolvedChkId =
-                r.checker_id || resolveEmployeeByName(r.checker_name || "")?.doc_id || null;
+                r.checker_id || resolveCheckerByName(r.checker_name || "")?.doc_id || null;
               return {
                 doc_id: r.doc_id,
                 partner_id: resolvedPrtId,
@@ -3090,6 +3268,7 @@ export const TempTab: React.FC<TempTabProps> = ({
       defaultStrictDivision,
       resolvePartnerByName,
       resolveEmployeeByName,
+      resolveCheckerByName,
       reloadFromFirestore,
       showToast,
     ],
@@ -3728,8 +3907,13 @@ export const TempTab: React.FC<TempTabProps> = ({
         /* View Mode: Pure Database Table (Strict Document ID & Foreign Keys + Inline Multi-Row Drafts) */
         <div className="bg-white rounded-2xl border border-[#e0e0fa] overflow-hidden">
           <datalist id="inline-lots-list">
-            {lotsCol.map((l) => (
-              <option key={l.doc_id} value={l.doc_id} />
+            {opnameLotOptions.list.map((l) => (
+              <option key={l.lot_no} value={l.lot_no} />
+            ))}
+          </datalist>
+          <datalist id="inline-skus-list">
+            {opnameSkuOptions.map((skuVal) => (
+              <option key={skuVal} value={skuVal} />
             ))}
           </datalist>
           <datalist id="inline-partners-list">
@@ -3759,6 +3943,11 @@ export const TempTab: React.FC<TempTabProps> = ({
               ]),
             ).map((name) => (
               <option key={name} value={name} />
+            ))}
+          </datalist>
+          <datalist id="inline-sales-agronomists-list">
+            {salesAgronomistOptions.all.map((e) => (
+              <option key={e.doc_id} value={e.full_name} />
             ))}
           </datalist>
           <datalist id="inline-categories-list">
@@ -3930,63 +4119,85 @@ export const TempTab: React.FC<TempTabProps> = ({
             {/* 1. opname_logs (Header Per Bulan: April -> Maret dengan IN, IDLE, POG) */}
             {activeCollection === "opname_logs" && (
               <div>
-                {/* Sub-bar Arsitektur: 1 Tabel Gabungan vs Filter Metrik (In / Idle / POG) */}
-                <div className="sticky left-0 px-4 py-3.5 bg-[#f4f2ff]/45 border-b border-[#e0e0fa] flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+                {/* Sub-bar Arsitektur: 1 Tabel Gabungan vs Filter Metrik + Aksi Edit Massal */}
+                <div className="sticky left-0 px-4 py-3.5 bg-[#f4f2ff]/45 border-b border-[#e0e0fa] flex flex-col xl:flex-row xl:items-center xl:justify-between gap-3">
                   <div className="min-w-0 flex-1 text-xs text-[#434655] leading-relaxed">
                     <span className="font-bold text-[#181a2c]">
                       1 Tabel Gabungan (FY2026 · Apr → Mar):
                     </span>{" "}
-                    Setiap sel bulan menyimpan{" "}
-                    <code className="font-mono text-[11px] bg-white px-1.5 py-0.5 rounded border border-[#e0e0fa] text-primary">
-                      &#123; in, idle, pog &#125;
-                    </code>{" "}
-                    lengkap dengan rekap saldo akhir.
+                    Partner, Lot, SKU &amp; Checker (khusus{" "}
+                    <span className="font-semibold text-[#181a2c]">Sales Agronomist</span>) terhubung
+                    ke tabel referensi.
                   </div>
-                  <div className="flex flex-wrap items-center gap-1 bg-white p-1 rounded-xl border border-[#e0e0fa]">
-                    <button
-                      type="button"
-                      onClick={() => setOpnameMetricView("combined")}
-                      className={`px-2.5 py-1.5 rounded-lg text-[11px] font-mono font-bold whitespace-nowrap cursor-pointer transition-colors ${
-                        opnameMetricView === "combined"
-                          ? "bg-[#181a2c] text-white shadow-2xs"
-                          : "text-[#434655] hover:bg-[#f4f2ff]"
-                      }`}
-                    >
-                      Semua (IN · IDLE · POG)
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setOpnameMetricView("in")}
-                      className={`px-2.5 py-1.5 rounded-lg text-[11px] font-mono font-bold whitespace-nowrap cursor-pointer transition-colors ${
-                        opnameMetricView === "in"
-                          ? "bg-blue-600 text-white shadow-2xs"
-                          : "text-blue-700 hover:bg-blue-50"
-                      }`}
-                    >
-                      Hanya IN
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setOpnameMetricView("idle")}
-                      className={`px-2.5 py-1.5 rounded-lg text-[11px] font-mono font-bold whitespace-nowrap cursor-pointer transition-colors ${
-                        opnameMetricView === "idle"
-                          ? "bg-amber-600 text-white shadow-2xs"
-                          : "text-amber-700 hover:bg-amber-50"
-                      }`}
-                    >
-                      Hanya IDLE
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setOpnameMetricView("pog")}
-                      className={`px-2.5 py-1.5 rounded-lg text-[11px] font-mono font-bold whitespace-nowrap cursor-pointer transition-colors ${
-                        opnameMetricView === "pog"
-                          ? "bg-emerald-600 text-white shadow-2xs"
-                          : "text-emerald-700 hover:bg-emerald-50"
-                      }`}
-                    >
-                      Hanya POG
-                    </button>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <button
+                        type="button"
+                        disabled={paginatedLogs.length === 0}
+                        onClick={() => handleStartEditRows("opname_logs", paginatedLogs)}
+                        className="h-8 px-2.5 rounded-lg bg-white border border-indigo-300 hover:bg-indigo-50 text-primary font-mono text-[11px] font-bold whitespace-nowrap cursor-pointer disabled:opacity-40 flex items-center gap-1"
+                        title="Masuk mode edit untuk seluruh baris di halaman ini"
+                      >
+                        <span className="material-symbols-outlined text-[14px]">edit_note</span>
+                        Edit Halaman ({paginatedLogs.length})
+                      </button>
+                      <button
+                        type="button"
+                        disabled={filteredLogs.length === 0}
+                        onClick={() => handleStartEditRows("opname_logs", filteredLogs)}
+                        className="h-8 px-2.5 rounded-lg bg-[#154be2] hover:bg-[#154be2]/90 text-white font-mono text-[11px] font-bold whitespace-nowrap cursor-pointer disabled:opacity-40 flex items-center gap-1 shadow-2xs"
+                        title="Edit seluruh data opname_logs yang tampil saat ini"
+                      >
+                        <span className="material-symbols-outlined text-[14px]">edit</span>
+                        Edit Seluruh Data ({filteredLogs.length})
+                      </button>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-1 bg-white p-1 rounded-xl border border-[#e0e0fa]">
+                      <button
+                        type="button"
+                        onClick={() => setOpnameMetricView("combined")}
+                        className={`px-2.5 py-1.5 rounded-lg text-[11px] font-mono font-bold whitespace-nowrap cursor-pointer transition-colors ${
+                          opnameMetricView === "combined"
+                            ? "bg-[#181a2c] text-white shadow-2xs"
+                            : "text-[#434655] hover:bg-[#f4f2ff]"
+                        }`}
+                      >
+                        Semua (IN · IDLE · POG)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setOpnameMetricView("in")}
+                        className={`px-2.5 py-1.5 rounded-lg text-[11px] font-mono font-bold whitespace-nowrap cursor-pointer transition-colors ${
+                          opnameMetricView === "in"
+                            ? "bg-blue-600 text-white shadow-2xs"
+                            : "text-blue-700 hover:bg-blue-50"
+                        }`}
+                      >
+                        Hanya IN
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setOpnameMetricView("idle")}
+                        className={`px-2.5 py-1.5 rounded-lg text-[11px] font-mono font-bold whitespace-nowrap cursor-pointer transition-colors ${
+                          opnameMetricView === "idle"
+                            ? "bg-amber-600 text-white shadow-2xs"
+                            : "text-amber-700 hover:bg-amber-50"
+                        }`}
+                      >
+                        Hanya IDLE
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setOpnameMetricView("pog")}
+                        className={`px-2.5 py-1.5 rounded-lg text-[11px] font-mono font-bold whitespace-nowrap cursor-pointer transition-colors ${
+                          opnameMetricView === "pog"
+                            ? "bg-emerald-600 text-white shadow-2xs"
+                            : "text-emerald-700 hover:bg-emerald-50"
+                        }`}
+                      >
+                        Hanya POG
+                      </button>
+                    </div>
                   </div>
                 </div>
 
@@ -4030,89 +4241,258 @@ export const TempTab: React.FC<TempTabProps> = ({
                       <tr key={d._draftId} className="bg-emerald-50/45 border-b border-emerald-200/70">
                         <td className="py-2 px-3 text-[10px] font-bold text-emerald-700">+</td>
                         <td className="py-2 px-2 whitespace-nowrap">
-                          <input
-                            type="text"
-                            list="inline-partners-list"
-                            value={d.partner_name || ""}
-                            onPaste={(e) => handlePasteDraftCells("opname_logs", draftIdx, "partner_name", e)}
+                          <select
+                            value={d.partner_id || ""}
+                            onPaste={(e) => handlePasteDraftCells("opname_logs", draftIdx, "partner_name", e, true)}
                             onChange={(e) => {
-                              const val = e.target.value;
-                              const matched = resolvePartnerByName(val);
+                              const prtId = e.target.value;
+                              const matched = prtId ? opnamePartnerOptions.map.get(prtId) : undefined;
                               handleUpdateInlineDraft("opname_logs", d._draftId, {
-                                partner_name: val,
-                                partner_id: matched ? matched.doc_id : "",
+                                partner_id: prtId,
+                                partner_name: matched ? matched.partner_name : "",
                               });
                             }}
-                            placeholder="Nama Partner*"
-                            className="h-8 w-44 bg-white border border-emerald-300 focus:border-primary rounded-lg px-2 text-[11px] font-sans font-semibold uppercase outline-none"
-                          />
-                        </td>
-                        <td className="py-2 px-3 text-[11px] font-mono font-bold text-primary whitespace-nowrap">
-                          {d.partner_id || <span className="text-[#8E94B7] italic font-normal">(Auto)</span>}
-                        </td>
-                        <td className="py-2 px-2 whitespace-nowrap">
-                          <input
-                            type="text"
-                            list="inline-lots-list"
-                            value={d.lot_no}
-                            onPaste={(e) => handlePasteDraftCells("opname_logs", draftIdx, "lot_no", e)}
-                            onChange={(e) =>
-                              handleUpdateInlineDraft("opname_logs", d._draftId, {
-                                lot_no: e.target.value,
-                              })
-                            }
-                            placeholder="Nomor Lot*"
-                            className="h-8 w-32 bg-white border border-emerald-300 focus:border-primary rounded-lg px-2 text-[11px] font-bold uppercase outline-none"
-                          />
+                            className="h-8 w-48 bg-white border border-emerald-300 focus:border-primary rounded-lg px-2 text-[11px] font-sans font-semibold outline-none cursor-pointer"
+                          >
+                            <option value="">-- Pilih Partner (partners) --</option>
+                            {opnamePartnerOptions.primary.map((p) => (
+                              <option key={p.doc_id} value={p.doc_id}>
+                                {p.partner_name} ({p.category || "-"} · {p.area || p.province || "-"})
+                              </option>
+                            ))}
+                            {opnamePartnerOptions.secondary.length > 0 && (
+                              <optgroup label="Partner Divisi/Scope Lain">
+                                {opnamePartnerOptions.secondary.map((p) => (
+                                  <option key={p.doc_id} value={p.doc_id}>
+                                    {p.partner_name} ({p.division_group} · {p.area || p.province || "-"})
+                                  </option>
+                                ))}
+                              </optgroup>
+                            )}
+                          </select>
                         </td>
                         <td className="py-2 px-2 whitespace-nowrap">
-                          <input
-                            type="text"
-                            value={d.sku || ""}
-                            onPaste={(e) => handlePasteDraftCells("opname_logs", draftIdx, "sku", e)}
-                            onChange={(e) =>
-                              handleUpdateInlineDraft("opname_logs", d._draftId, {
-                                sku: e.target.value.toUpperCase(),
-                              })
-                            }
-                            placeholder="SKU"
-                            className="h-8 w-28 bg-white border border-emerald-300 focus:border-primary rounded-lg px-2 text-[11px] font-bold uppercase outline-none"
-                          />
-                        </td>
-                        <td className="py-2 px-2 whitespace-nowrap">
-                          <input
-                            type="text"
-                            list="inline-employees-list"
-                            value={d.checker_name || ""}
-                            onPaste={(e) => handlePasteDraftCells("opname_logs", draftIdx, "checker_name", e)}
+                          <select
+                            value={d.partner_id || ""}
+                            onPaste={(e) => handlePasteDraftCells("opname_logs", draftIdx, "partner_id", e, true)}
                             onChange={(e) => {
-                              const val = e.target.value;
-                              const matched = resolveEmployeeByName(val);
+                              const prtId = e.target.value;
+                              const matched = prtId ? opnamePartnerOptions.map.get(prtId) : undefined;
                               handleUpdateInlineDraft("opname_logs", d._draftId, {
-                                checker_name: val,
-                                checker_id: matched ? matched.doc_id : "",
+                                partner_id: prtId,
+                                partner_name: matched ? matched.partner_name : "",
                               });
                             }}
-                            placeholder="Nama Checker*"
-                            className="h-8 w-40 bg-white border border-emerald-300 focus:border-primary rounded-lg px-2 text-[11px] font-sans font-semibold outline-none"
-                          />
-                        </td>
-                        <td className="py-2 px-3 text-[11px] font-mono font-bold text-primary whitespace-nowrap">
-                          {d.checker_id || <span className="text-[#8E94B7] italic font-normal">(Auto)</span>}
+                            className="h-8 w-28 bg-white border border-emerald-300 focus:border-primary rounded-lg px-1.5 text-[11px] font-mono font-bold text-primary outline-none cursor-pointer"
+                          >
+                            <option value="">null</option>
+                            {opnamePartnerOptions.primary.map((p) => (
+                              <option key={p.doc_id} value={p.doc_id}>
+                                {p.doc_id}
+                              </option>
+                            ))}
+                            {opnamePartnerOptions.secondary.map((p) => (
+                              <option key={p.doc_id} value={p.doc_id}>
+                                {p.doc_id} ({p.division_group})
+                              </option>
+                            ))}
+                          </select>
                         </td>
                         <td className="py-2 px-2 whitespace-nowrap">
-                          <input
-                            type="text"
-                            value={d.crop_year}
-                            onPaste={(e) => handlePasteDraftCells("opname_logs", draftIdx, "crop_year", e)}
+                          <div className="flex items-center gap-1">
+                            {d._customLot ? (
+                              <input
+                                type="text"
+                                list="inline-lots-list"
+                                value={d.lot_no || ""}
+                                onPaste={(e) => handlePasteDraftCells("opname_logs", draftIdx, "lot_no", e)}
+                                onChange={(e) =>
+                                  handleUpdateInlineDraft("opname_logs", d._draftId, {
+                                    lot_no: e.target.value.toUpperCase(),
+                                  })
+                                }
+                                placeholder="Nomor Lot*"
+                                className="h-8 w-32 bg-white border border-emerald-300 focus:border-primary rounded-lg px-2 text-[11px] font-bold uppercase outline-none"
+                              />
+                            ) : (
+                              <select
+                                value={String(d.lot_no || "").toUpperCase()}
+                                onPaste={(e) => handlePasteDraftCells("opname_logs", draftIdx, "lot_no", e, true)}
+                                onChange={(e) => {
+                                  const lotVal = e.target.value.toUpperCase();
+                                  const ref = opnameLotOptions.map.get(lotVal);
+                                  handleUpdateInlineDraft("opname_logs", d._draftId, {
+                                    lot_no: lotVal,
+                                    ...(ref?.sku ? { sku: ref.sku } : {}),
+                                  });
+                                }}
+                                className="h-8 w-40 bg-white border border-emerald-300 focus:border-primary rounded-lg px-2 text-[11px] font-bold uppercase outline-none cursor-pointer"
+                              >
+                                <option value="">-- Pilih Lot --</option>
+                                {d.lot_no && !opnameLotOptions.map.has(String(d.lot_no).toUpperCase()) && (
+                                  <option value={String(d.lot_no).toUpperCase()}>
+                                    {String(d.lot_no).toUpperCase()} (Baru)
+                                  </option>
+                                )}
+                                {opnameLotOptions.list.map((l) => (
+                                  <option key={l.lot_no} value={l.lot_no}>
+                                    {l.lot_no}
+                                    {l.hybrid_name ? ` — ${l.hybrid_name}` : ""}
+                                    {l.sku ? ` [${l.sku}]` : ""}
+                                  </option>
+                                ))}
+                              </select>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleUpdateInlineDraft("opname_logs", d._draftId, {
+                                  _customLot: !d._customLot,
+                                })
+                              }
+                              title={d._customLot ? "Pilih dari referensi Lot" : "Ketik Lot baru manual"}
+                              className="h-8 px-1.5 rounded-lg bg-white border border-emerald-200 hover:bg-emerald-100 text-[10px] font-bold text-emerald-800 cursor-pointer"
+                            >
+                              {d._customLot ? "Ref" : "✎"}
+                            </button>
+                          </div>
+                        </td>
+                        <td className="py-2 px-2 whitespace-nowrap">
+                          <div className="flex items-center gap-1">
+                            {d._customSku ? (
+                              <input
+                                type="text"
+                                list="inline-skus-list"
+                                value={d.sku || ""}
+                                onPaste={(e) => handlePasteDraftCells("opname_logs", draftIdx, "sku", e)}
+                                onChange={(e) =>
+                                  handleUpdateInlineDraft("opname_logs", d._draftId, {
+                                    sku: e.target.value.toUpperCase(),
+                                  })
+                                }
+                                placeholder="SKU"
+                                className="h-8 w-24 bg-white border border-emerald-300 focus:border-primary rounded-lg px-2 text-[11px] font-bold uppercase outline-none"
+                              />
+                            ) : (
+                              <select
+                                value={String(d.sku || "").toUpperCase()}
+                                onPaste={(e) => handlePasteDraftCells("opname_logs", draftIdx, "sku", e, true)}
+                                onChange={(e) =>
+                                  handleUpdateInlineDraft("opname_logs", d._draftId, {
+                                    sku: e.target.value.toUpperCase(),
+                                  })
+                                }
+                                className="h-8 w-28 bg-white border border-emerald-300 focus:border-primary rounded-lg px-1.5 text-[11px] font-bold uppercase outline-none cursor-pointer"
+                              >
+                                <option value="">-- SKU --</option>
+                                {d.sku && !opnameSkuOptions.includes(String(d.sku).toUpperCase()) && (
+                                  <option value={String(d.sku).toUpperCase()}>
+                                    {String(d.sku).toUpperCase()}
+                                  </option>
+                                )}
+                                {opnameSkuOptions.map((s) => (
+                                  <option key={s} value={s}>
+                                    {s}
+                                  </option>
+                                ))}
+                              </select>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleUpdateInlineDraft("opname_logs", d._draftId, {
+                                  _customSku: !d._customSku,
+                                })
+                              }
+                              title={d._customSku ? "Pilih dari referensi SKU" : "Ketik SKU manual"}
+                              className="h-8 px-1.5 rounded-lg bg-white border border-emerald-200 hover:bg-emerald-100 text-[10px] font-bold text-emerald-800 cursor-pointer"
+                            >
+                              {d._customSku ? "Ref" : "✎"}
+                            </button>
+                          </div>
+                        </td>
+                        <td className="py-2 px-2 whitespace-nowrap">
+                          <select
+                            value={d.checker_id || ""}
+                            onPaste={(e) => handlePasteDraftCells("opname_logs", draftIdx, "checker_name", e, true)}
+                            onChange={(e) => {
+                              const chkId = e.target.value;
+                              const matched = chkId ? empById.get(chkId) : undefined;
+                              handleUpdateInlineDraft("opname_logs", d._draftId, {
+                                checker_id: chkId,
+                                checker_name: matched ? matched.full_name : "",
+                              });
+                            }}
+                            className="h-8 w-44 bg-white border border-emerald-300 focus:border-primary rounded-lg px-2 text-[11px] font-sans font-semibold outline-none cursor-pointer"
+                          >
+                            <option value="">-- Sales Agronomist --</option>
+                            {d.checker_id && !salesAgronomistOptions.saMap.has(d.checker_id) && (
+                              <option value={d.checker_id}>
+                                {d.checker_name || empById.get(d.checker_id)?.full_name || d.checker_id} (Non-SA)
+                              </option>
+                            )}
+                            {salesAgronomistOptions.primary.map((emp) => (
+                              <option key={emp.doc_id} value={emp.doc_id}>
+                                {emp.full_name} ({emp.area || emp.province || emp.division_group})
+                                {emp.status === "Nonaktif" ? " [Nonaktif]" : ""}
+                              </option>
+                            ))}
+                            {salesAgronomistOptions.secondary.length > 0 && (
+                              <optgroup label="Sales Agronomist Divisi Lain">
+                                {salesAgronomistOptions.secondary.map((emp) => (
+                                  <option key={emp.doc_id} value={emp.doc_id}>
+                                    {emp.full_name} ({emp.division_group} · {emp.area || emp.province})
+                                  </option>
+                                ))}
+                              </optgroup>
+                            )}
+                          </select>
+                        </td>
+                        <td className="py-2 px-2 whitespace-nowrap">
+                          <select
+                            value={d.checker_id || ""}
+                            onPaste={(e) => handlePasteDraftCells("opname_logs", draftIdx, "checker_id", e, true)}
+                            onChange={(e) => {
+                              const chkId = e.target.value;
+                              const matched = chkId ? empById.get(chkId) : undefined;
+                              handleUpdateInlineDraft("opname_logs", d._draftId, {
+                                checker_id: chkId,
+                                checker_name: matched ? matched.full_name : "",
+                              });
+                            }}
+                            className="h-8 w-28 bg-white border border-emerald-300 focus:border-primary rounded-lg px-1.5 text-[11px] font-mono font-bold text-primary outline-none cursor-pointer"
+                          >
+                            <option value="">null</option>
+                            {d.checker_id && !salesAgronomistOptions.saMap.has(d.checker_id) && (
+                              <option value={d.checker_id}>{d.checker_id} (Non-SA)</option>
+                            )}
+                            {salesAgronomistOptions.all.map((emp) => (
+                              <option key={emp.doc_id} value={emp.doc_id}>
+                                {emp.doc_id}
+                              </option>
+                            ))}
+                          </select>
+                        </td>
+                        <td className="py-2 px-2 whitespace-nowrap">
+                          <select
+                            value={d.crop_year || "FY2026"}
+                            onPaste={(e) => handlePasteDraftCells("opname_logs", draftIdx, "crop_year", e, true)}
                             onChange={(e) =>
                               handleUpdateInlineDraft("opname_logs", d._draftId, {
                                 crop_year: e.target.value,
                               })
                             }
-                            placeholder="FY2026"
-                            className="h-8 w-20 bg-white border border-emerald-300 focus:border-primary rounded-lg px-2 text-[11px] font-semibold outline-none text-center"
-                          />
+                            className="h-8 w-24 bg-white border border-emerald-300 focus:border-primary rounded-lg px-1.5 text-[11px] font-semibold outline-none text-center cursor-pointer"
+                          >
+                            {d.crop_year && !opnameCropYearOptions.includes(d.crop_year) && (
+                              <option value={d.crop_year}>{d.crop_year}</option>
+                            )}
+                            {opnameCropYearOptions.map((cy) => (
+                              <option key={cy} value={cy}>
+                                {cy}
+                              </option>
+                            ))}
+                          </select>
                         </td>
                         {FISCAL_MONTH_COLS.map(({ key }) => {
                           const cell = d.months?.[key] || { in: "", idle: "", pog: "" };
@@ -4195,97 +4575,278 @@ export const TempTab: React.FC<TempTabProps> = ({
                               />
                             </td>
                             <td className="py-2 px-2 whitespace-nowrap">
-                              <input
-                                type="text"
-                                list="inline-partners-list"
-                                value={editRow.partner_name || ""}
+                              <select
+                                value={editRow.partner_id || ""}
                                 onPaste={(e) =>
-                                  handlePasteEditCells("opname_logs", paginatedLogs, rowIdx, "partner_name", e)
+                                  handlePasteEditCells("opname_logs", paginatedLogs, rowIdx, "partner_name", e, true)
                                 }
                                 onChange={(e) => {
-                                  const val = e.target.value;
-                                  const matched = resolvePartnerByName(val);
+                                  const prtId = e.target.value;
+                                  const matched = prtId ? opnamePartnerOptions.map.get(prtId) : undefined;
                                   handleUpdateEditField("opname_logs", rowId, {
-                                    partner_name: val,
-                                    partner_id: matched ? matched.doc_id : "",
+                                    partner_id: prtId,
+                                    partner_name: matched ? matched.partner_name : "",
                                   });
                                 }}
-                                placeholder="Nama Partner*"
-                                className="h-8 w-44 bg-white border border-indigo-300 focus:border-primary rounded-lg px-2 text-[11px] font-sans font-semibold uppercase outline-none"
-                              />
-                            </td>
-                            <td className="py-2 px-3 text-[11px] font-mono font-bold text-primary whitespace-nowrap">
-                              {editRow.partner_id || <span className="text-[#8E94B7] italic font-normal">(Auto)</span>}
-                            </td>
-                            <td className="py-2 px-2 whitespace-nowrap">
-                              <input
-                                type="text"
-                                list="inline-lots-list"
-                                value={editRow.lot_no}
-                                onPaste={(e) =>
-                                  handlePasteEditCells("opname_logs", paginatedLogs, rowIdx, "lot_no", e)
-                                }
-                                onChange={(e) =>
-                                  handleUpdateEditField("opname_logs", rowId, {
-                                    lot_no: e.target.value.toUpperCase(),
-                                  })
-                                }
-                                className="h-8 w-32 bg-white border border-indigo-300 focus:border-primary rounded-lg px-2 text-[11px] font-bold uppercase outline-none"
-                              />
+                                className="h-8 w-48 bg-white border border-indigo-300 focus:border-primary rounded-lg px-2 text-[11px] font-sans font-semibold outline-none cursor-pointer"
+                              >
+                                <option value="">-- Pilih Partner (partners) --</option>
+                                {opnamePartnerOptions.primary.map((p) => (
+                                  <option key={p.doc_id} value={p.doc_id}>
+                                    {p.partner_name} ({p.category || "-"} · {p.area || p.province || "-"})
+                                  </option>
+                                ))}
+                                {opnamePartnerOptions.secondary.length > 0 && (
+                                  <optgroup label="Partner Divisi/Scope Lain">
+                                    {opnamePartnerOptions.secondary.map((p) => (
+                                      <option key={p.doc_id} value={p.doc_id}>
+                                        {p.partner_name} ({p.division_group} · {p.area || p.province || "-"})
+                                      </option>
+                                    ))}
+                                  </optgroup>
+                                )}
+                              </select>
                             </td>
                             <td className="py-2 px-2 whitespace-nowrap">
-                              <input
-                                type="text"
-                                value={editRow.sku || ""}
+                              <select
+                                value={editRow.partner_id || ""}
                                 onPaste={(e) =>
-                                  handlePasteEditCells("opname_logs", paginatedLogs, rowIdx, "sku", e)
-                                }
-                                onChange={(e) =>
-                                  handleUpdateEditField("opname_logs", rowId, {
-                                    sku: e.target.value.toUpperCase(),
-                                  })
-                                }
-                                placeholder="SKU"
-                                className="h-8 w-28 bg-white border border-indigo-300 focus:border-primary rounded-lg px-2 text-[11px] font-bold uppercase outline-none"
-                              />
-                            </td>
-                            <td className="py-2 px-2 whitespace-nowrap">
-                              <input
-                                type="text"
-                                list="inline-employees-list"
-                                value={editRow.checker_name || ""}
-                                onPaste={(e) =>
-                                  handlePasteEditCells("opname_logs", paginatedLogs, rowIdx, "checker_name", e)
+                                  handlePasteEditCells("opname_logs", paginatedLogs, rowIdx, "partner_id", e, true)
                                 }
                                 onChange={(e) => {
-                                  const val = e.target.value;
-                                  const matched = resolveEmployeeByName(val);
+                                  const prtId = e.target.value;
+                                  const matched = prtId ? opnamePartnerOptions.map.get(prtId) : undefined;
                                   handleUpdateEditField("opname_logs", rowId, {
-                                    checker_name: val,
-                                    checker_id: matched ? matched.doc_id : "",
+                                    partner_id: prtId,
+                                    partner_name: matched ? matched.partner_name : "",
                                   });
                                 }}
-                                placeholder="Nama Checker*"
-                                className="h-8 w-40 bg-white border border-indigo-300 focus:border-primary rounded-lg px-2 text-[11px] font-sans font-semibold outline-none"
-                              />
-                            </td>
-                            <td className="py-2 px-3 text-[11px] font-mono font-bold text-primary whitespace-nowrap">
-                              {editRow.checker_id || <span className="text-[#8E94B7] italic font-normal">(Auto)</span>}
+                                className="h-8 w-28 bg-white border border-indigo-300 focus:border-primary rounded-lg px-1.5 text-[11px] font-mono font-bold text-primary outline-none cursor-pointer"
+                              >
+                                <option value="">null</option>
+                                {opnamePartnerOptions.primary.map((p) => (
+                                  <option key={p.doc_id} value={p.doc_id}>
+                                    {p.doc_id}
+                                  </option>
+                                ))}
+                                {opnamePartnerOptions.secondary.map((p) => (
+                                  <option key={p.doc_id} value={p.doc_id}>
+                                    {p.doc_id} ({p.division_group})
+                                  </option>
+                                ))}
+                              </select>
                             </td>
                             <td className="py-2 px-2 whitespace-nowrap">
-                              <input
-                                type="text"
-                                value={editRow.crop_year}
+                              <div className="flex items-center gap-1">
+                                {editRow._customLot ? (
+                                  <input
+                                    type="text"
+                                    list="inline-lots-list"
+                                    value={editRow.lot_no || ""}
+                                    onPaste={(e) =>
+                                      handlePasteEditCells("opname_logs", paginatedLogs, rowIdx, "lot_no", e)
+                                    }
+                                    onChange={(e) =>
+                                      handleUpdateEditField("opname_logs", rowId, {
+                                        lot_no: e.target.value.toUpperCase(),
+                                      })
+                                    }
+                                    className="h-8 w-32 bg-white border border-indigo-300 focus:border-primary rounded-lg px-2 text-[11px] font-bold uppercase outline-none"
+                                  />
+                                ) : (
+                                  <select
+                                    value={String(editRow.lot_no || "").toUpperCase()}
+                                    onPaste={(e) =>
+                                      handlePasteEditCells("opname_logs", paginatedLogs, rowIdx, "lot_no", e, true)
+                                    }
+                                    onChange={(e) => {
+                                      const lotVal = e.target.value.toUpperCase();
+                                      const ref = opnameLotOptions.map.get(lotVal);
+                                      handleUpdateEditField("opname_logs", rowId, {
+                                        lot_no: lotVal,
+                                        ...(ref?.sku ? { sku: ref.sku } : {}),
+                                      });
+                                    }}
+                                    className="h-8 w-40 bg-white border border-indigo-300 focus:border-primary rounded-lg px-2 text-[11px] font-bold uppercase outline-none cursor-pointer"
+                                  >
+                                    <option value="">-- Pilih Lot --</option>
+                                    {editRow.lot_no && !opnameLotOptions.map.has(String(editRow.lot_no).toUpperCase()) && (
+                                      <option value={String(editRow.lot_no).toUpperCase()}>
+                                        {String(editRow.lot_no).toUpperCase()} (Baru)
+                                      </option>
+                                    )}
+                                    {opnameLotOptions.list.map((l) => (
+                                      <option key={l.lot_no} value={l.lot_no}>
+                                        {l.lot_no}
+                                        {l.hybrid_name ? ` — ${l.hybrid_name}` : ""}
+                                        {l.sku ? ` [${l.sku}]` : ""}
+                                      </option>
+                                    ))}
+                                  </select>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleUpdateEditField("opname_logs", rowId, {
+                                      _customLot: !editRow._customLot,
+                                    })
+                                  }
+                                  title={editRow._customLot ? "Pilih dari referensi Lot" : "Ketik Lot manual"}
+                                  className="h-8 px-1.5 rounded-lg bg-white border border-indigo-200 hover:bg-indigo-100 text-[10px] font-bold text-primary cursor-pointer"
+                                >
+                                  {editRow._customLot ? "Ref" : "✎"}
+                                </button>
+                              </div>
+                            </td>
+                            <td className="py-2 px-2 whitespace-nowrap">
+                              <div className="flex items-center gap-1">
+                                {editRow._customSku ? (
+                                  <input
+                                    type="text"
+                                    list="inline-skus-list"
+                                    value={editRow.sku || ""}
+                                    onPaste={(e) =>
+                                      handlePasteEditCells("opname_logs", paginatedLogs, rowIdx, "sku", e)
+                                    }
+                                    onChange={(e) =>
+                                      handleUpdateEditField("opname_logs", rowId, {
+                                        sku: e.target.value.toUpperCase(),
+                                      })
+                                    }
+                                    placeholder="SKU"
+                                    className="h-8 w-24 bg-white border border-indigo-300 focus:border-primary rounded-lg px-2 text-[11px] font-bold uppercase outline-none"
+                                  />
+                                ) : (
+                                  <select
+                                    value={String(editRow.sku || "").toUpperCase()}
+                                    onPaste={(e) =>
+                                      handlePasteEditCells("opname_logs", paginatedLogs, rowIdx, "sku", e, true)
+                                    }
+                                    onChange={(e) =>
+                                      handleUpdateEditField("opname_logs", rowId, {
+                                        sku: e.target.value.toUpperCase(),
+                                      })
+                                    }
+                                    className="h-8 w-28 bg-white border border-indigo-300 focus:border-primary rounded-lg px-1.5 text-[11px] font-bold uppercase outline-none cursor-pointer"
+                                  >
+                                    <option value="">-- SKU --</option>
+                                    {editRow.sku && !opnameSkuOptions.includes(String(editRow.sku).toUpperCase()) && (
+                                      <option value={String(editRow.sku).toUpperCase()}>
+                                        {String(editRow.sku).toUpperCase()}
+                                      </option>
+                                    )}
+                                    {opnameSkuOptions.map((s) => (
+                                      <option key={s} value={s}>
+                                        {s}
+                                      </option>
+                                    ))}
+                                  </select>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleUpdateEditField("opname_logs", rowId, {
+                                      _customSku: !editRow._customSku,
+                                    })
+                                  }
+                                  title={editRow._customSku ? "Pilih dari referensi SKU" : "Ketik SKU manual"}
+                                  className="h-8 px-1.5 rounded-lg bg-white border border-indigo-200 hover:bg-indigo-100 text-[10px] font-bold text-primary cursor-pointer"
+                                >
+                                  {editRow._customSku ? "Ref" : "✎"}
+                                </button>
+                              </div>
+                            </td>
+                            <td className="py-2 px-2 whitespace-nowrap">
+                              <select
+                                value={editRow.checker_id || ""}
                                 onPaste={(e) =>
-                                  handlePasteEditCells("opname_logs", paginatedLogs, rowIdx, "crop_year", e)
+                                  handlePasteEditCells("opname_logs", paginatedLogs, rowIdx, "checker_name", e, true)
+                                }
+                                onChange={(e) => {
+                                  const chkId = e.target.value;
+                                  const matched = chkId ? empById.get(chkId) : undefined;
+                                  handleUpdateEditField("opname_logs", rowId, {
+                                    checker_id: chkId,
+                                    checker_name: matched ? matched.full_name : "",
+                                  });
+                                }}
+                                className="h-8 w-44 bg-white border border-indigo-300 focus:border-primary rounded-lg px-2 text-[11px] font-sans font-semibold outline-none cursor-pointer"
+                              >
+                                <option value="">-- Sales Agronomist --</option>
+                                {editRow.checker_id && !salesAgronomistOptions.saMap.has(editRow.checker_id) && (
+                                  <option value={editRow.checker_id}>
+                                    {editRow.checker_name ||
+                                      empById.get(editRow.checker_id)?.full_name ||
+                                      editRow.checker_id}{" "}
+                                    (Non-SA Eksisting)
+                                  </option>
+                                )}
+                                {salesAgronomistOptions.primary.map((emp) => (
+                                  <option key={emp.doc_id} value={emp.doc_id}>
+                                    {emp.full_name} ({emp.area || emp.province || emp.division_group})
+                                    {emp.status === "Nonaktif" ? " [Nonaktif]" : ""}
+                                  </option>
+                                ))}
+                                {salesAgronomistOptions.secondary.length > 0 && (
+                                  <optgroup label="Sales Agronomist Divisi Lain">
+                                    {salesAgronomistOptions.secondary.map((emp) => (
+                                      <option key={emp.doc_id} value={emp.doc_id}>
+                                        {emp.full_name} ({emp.division_group} · {emp.area || emp.province})
+                                      </option>
+                                    ))}
+                                  </optgroup>
+                                )}
+                              </select>
+                            </td>
+                            <td className="py-2 px-2 whitespace-nowrap">
+                              <select
+                                value={editRow.checker_id || ""}
+                                onPaste={(e) =>
+                                  handlePasteEditCells("opname_logs", paginatedLogs, rowIdx, "checker_id", e, true)
+                                }
+                                onChange={(e) => {
+                                  const chkId = e.target.value;
+                                  const matched = chkId ? empById.get(chkId) : undefined;
+                                  handleUpdateEditField("opname_logs", rowId, {
+                                    checker_id: chkId,
+                                    checker_name: matched ? matched.full_name : "",
+                                  });
+                                }}
+                                className="h-8 w-28 bg-white border border-indigo-300 focus:border-primary rounded-lg px-1.5 text-[11px] font-mono font-bold text-primary outline-none cursor-pointer"
+                              >
+                                <option value="">null</option>
+                                {editRow.checker_id && !salesAgronomistOptions.saMap.has(editRow.checker_id) && (
+                                  <option value={editRow.checker_id}>{editRow.checker_id} (Non-SA)</option>
+                                )}
+                                {salesAgronomistOptions.all.map((emp) => (
+                                  <option key={emp.doc_id} value={emp.doc_id}>
+                                    {emp.doc_id}
+                                  </option>
+                                ))}
+                              </select>
+                            </td>
+                            <td className="py-2 px-2 whitespace-nowrap">
+                              <select
+                                value={editRow.crop_year || "FY2026"}
+                                onPaste={(e) =>
+                                  handlePasteEditCells("opname_logs", paginatedLogs, rowIdx, "crop_year", e, true)
                                 }
                                 onChange={(e) =>
                                   handleUpdateEditField("opname_logs", rowId, {
                                     crop_year: e.target.value,
                                   })
                                 }
-                                className="h-8 w-20 bg-white border border-indigo-300 focus:border-primary rounded-lg px-2 text-[11px] font-semibold outline-none text-center"
-                              />
+                                className="h-8 w-24 bg-white border border-indigo-300 focus:border-primary rounded-lg px-1.5 text-[11px] font-semibold outline-none text-center cursor-pointer"
+                              >
+                                {editRow.crop_year && !opnameCropYearOptions.includes(editRow.crop_year) && (
+                                  <option value={editRow.crop_year}>{editRow.crop_year}</option>
+                                )}
+                                {opnameCropYearOptions.map((cy) => (
+                                  <option key={cy} value={cy}>
+                                    {cy}
+                                  </option>
+                                ))}
+                              </select>
                             </td>
                             {FISCAL_MONTH_COLS.map(({ key }) => {
                               const cell = editRow.months?.[key] || { in: "", idle: "", pog: "" };
