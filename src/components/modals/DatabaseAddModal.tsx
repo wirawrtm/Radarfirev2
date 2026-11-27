@@ -7,7 +7,7 @@ import {
   addOpnameLogFirestore,
 } from "../../services/firestoreDb";
 import { extractExpFromLot } from "../../utils/formatters";
-import type { DivisionStrict } from "../../utils/firestoreNormalization";
+import type { DivisionStrict, OpnameUpdatedBy } from "../../utils/firestoreNormalization";
 
 export type OperationalCollectionKey =
   | "opname_logs"
@@ -98,6 +98,7 @@ export const DatabaseAddModal: React.FC<DatabaseAddModalProps> = ({
   const [opInKg, setOpInKg] = useState("0");
   const [opIdleKg, setOpIdleKg] = useState("0");
   const [opPogKg, setOpPogKg] = useState("0");
+  const [opUpdatedBy, setOpUpdatedBy] = useState<OpnameUpdatedBy>("sales");
 
   useEffect(() => {
     if (!isOpen) return;
@@ -116,6 +117,7 @@ export const DatabaseAddModal: React.FC<DatabaseAddModalProps> = ({
     setOpInKg("0");
     setOpIdleKg("0");
     setOpPogKg("0");
+    setOpUpdatedBy("sales");
     if (hybridsCol.length > 0 && !selectedHybridId) {
       setSelectedHybridId(hybridsCol[0].doc_id);
       setDrHybridId(hybridsCol[0].doc_id);
@@ -222,6 +224,7 @@ export const DatabaseAddModal: React.FC<DatabaseAddModalProps> = ({
           inKg: Number(opInKg) || 0,
           idleKg: Number(opIdleKg) || 0,
           pogKg: Number(opPogKg) || 0,
+          updatedBy: opUpdatedBy,
           existingLots: fsLots,
           existingLogs: fsOpnameLogs,
         });
@@ -618,23 +621,38 @@ export const DatabaseAddModal: React.FC<DatabaseAddModalProps> = ({
                   </div>
                 </div>
 
-                <div>
-                  <label className="text-[10px] text-[#8E94B7] font-bold uppercase tracking-wider ml-1 mb-1.5 block">
-                    Periode Bulan Opname
-                  </label>
-                  <select
-                    value={opMonthKey}
-                    onChange={(e) =>
-                      setOpMonthKey(e.target.value as (typeof FISCAL_MONTH_OPTIONS)[number]["key"])
-                    }
-                    className="w-full h-11 bg-[#fbf8ff] border border-[#edecff] focus:border-primary rounded-full px-4 text-xs font-semibold text-[#111] outline-none"
-                  >
-                    {FISCAL_MONTH_OPTIONS.map((m) => (
-                      <option key={m.key} value={m.key}>
-                        {m.label}
-                      </option>
-                    ))}
-                  </select>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-[10px] text-[#8E94B7] font-bold uppercase tracking-wider ml-1 mb-1.5 block">
+                      Periode Bulan Opname
+                    </label>
+                    <select
+                      value={opMonthKey}
+                      onChange={(e) =>
+                        setOpMonthKey(e.target.value as (typeof FISCAL_MONTH_OPTIONS)[number]["key"])
+                      }
+                      className="w-full h-11 bg-[#fbf8ff] border border-[#edecff] focus:border-primary rounded-full px-4 text-xs font-semibold text-[#111] outline-none"
+                    >
+                      {FISCAL_MONTH_OPTIONS.map((m) => (
+                        <option key={m.key} value={m.key}>
+                          {m.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-[#8E94B7] font-bold uppercase tracking-wider ml-1 mb-1.5 block">
+                      Sumber Update
+                    </label>
+                    <select
+                      value={opUpdatedBy}
+                      onChange={(e) => setOpUpdatedBy(e.target.value === "admin" ? "admin" : "sales")}
+                      className="w-full h-11 bg-[#fbf8ff] border border-[#edecff] focus:border-primary rounded-full px-4 text-xs font-semibold text-[#111] outline-none"
+                    >
+                      <option value="sales">sales</option>
+                      <option value="admin">admin</option>
+                    </select>
+                  </div>
                 </div>
 
                 <div className="grid grid-cols-3 gap-2.5">

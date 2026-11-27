@@ -22,6 +22,7 @@ import {
 import {
   buildNormalizedCollections,
   FISCAL_MONTH_COLS,
+  normalizeOpnameUpdatedBy,
   toIsoDateStr,
   toStrictDivision,
   toValidDocId,
@@ -383,7 +384,16 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                   : prevVal !== null && qty < prevVal
                     ? prevVal - qty
                     : 0;
-              monthPayload[key] = { in: inKg, idle: qty, pog: pogKg };
+              const updSource =
+                item[`upd_${key}`] !== undefined && String(item[`upd_${key}`]).trim() !== ""
+                  ? item[`upd_${key}`]
+                  : prevCell?.updated_by;
+              monthPayload[key] = {
+                in: inKg,
+                idle: qty,
+                pog: pogKg,
+                updated_by: normalizeOpnameUpdatedBy(updSource),
+              };
               prevVal = qty;
             } else {
               monthPayload[key] = null;

@@ -28,6 +28,7 @@ import {
   clampStr,
   FISCAL_MONTH_COLS,
   formatToDDMMYYYY,
+  normalizeOpnameUpdatedBy,
   parseDDMMYYYYToIso,
   toIsoDateStr,
   toStrictDivision,
@@ -40,6 +41,7 @@ import {
   type MonthlyOpnameCell,
   type NormalizedDataset,
   type OpnameLogFsDoc,
+  type OpnameUpdatedBy,
   type PartnerFsDoc,
 } from "../utils/firestoreNormalization";
 import { cleanForMatch, extractExpFromLot, getValidCategory } from "../utils/formatters";
@@ -1024,6 +1026,7 @@ export async function migrateNormalizedDatasetToFirestore(
           in: Number.isFinite(cIn) && cIn > 0 ? cIn : 0,
           idle: Number.isFinite(cIdle) && cIdle > 0 ? cIdle : 0,
           pog: Number.isFinite(cPog) && cPog > 0 ? cPog : 0,
+          updated_by: normalizeOpnameUpdatedBy(c.updated_by),
         };
       } else {
         payload[key] = null;
@@ -1608,7 +1611,16 @@ export async function saveBatchActivityToFirestore(
             : prev !== null && qty < prev
               ? prev - qty
               : 0;
-        monthPayload[key] = { in: inKg, idle: qty, pog: pogKg };
+        const updSource =
+          item[`upd_${key}`] !== undefined && String(item[`upd_${key}`]).trim() !== ""
+            ? item[`upd_${key}`]
+            : prevCell?.updated_by;
+        monthPayload[key] = {
+          in: inKg,
+          idle: qty,
+          pog: pogKg,
+          updated_by: normalizeOpnameUpdatedBy(updSource),
+        };
         prev = qty;
       } else {
         monthPayload[key] = null;
@@ -1947,6 +1959,7 @@ export async function addOpnameLogFirestore(
     inKg: number;
     idleKg: number;
     pogKg: number;
+    updatedBy?: OpnameUpdatedBy;
     existingLots: LotFsDoc[];
     existingLogs: OpnameLogFsDoc[];
   },
@@ -1972,6 +1985,7 @@ export async function addOpnameLogFirestore(
     in: Math.max(0, Number(params.inKg) || 0),
     idle: Math.max(0, Number(params.idleKg) || 0),
     pog: Math.max(0, Number(params.pogKg) || 0),
+    updated_by: normalizeOpnameUpdatedBy(params.updatedBy),
   };
 
   const existingLot = params.existingLots.find((l) => toValidDocId(l.doc_id) === lotNo);
@@ -2425,6 +2439,7 @@ export async function bulkAddOpnameLogsFirestore(
             in: Math.max(0, Number(cell.in) || 0),
             idle: Math.max(0, Number(cell.idle) || 0),
             pog: Math.max(0, Number(cell.pog) || 0),
+            updated_by: normalizeOpnameUpdatedBy(cell.updated_by),
           };
         }
       });
@@ -2451,6 +2466,7 @@ export async function bulkAddOpnameLogsFirestore(
               in: Math.max(0, Number(cell.in) || 0),
               idle: Math.max(0, Number(cell.idle) || 0),
               pog: Math.max(0, Number(cell.pog) || 0),
+              updated_by: normalizeOpnameUpdatedBy(cell.updated_by),
             }
           : null;
       });
@@ -2857,6 +2873,7 @@ export async function bulkUpdateOpnameLogsFirestore(
             in: Math.max(0, Number(cell.in) || 0),
             idle: Math.max(0, Number(cell.idle) || 0),
             pog: Math.max(0, Number(cell.pog) || 0),
+            updated_by: normalizeOpnameUpdatedBy(cell.updated_by),
           }
         : null;
     });

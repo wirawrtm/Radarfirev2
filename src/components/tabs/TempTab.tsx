@@ -7,7 +7,13 @@ import { PartnerDeleteModal } from "../modals/PartnerDeleteModal";
 import { EmployeeEditModal } from "../modals/EmployeeEditModal";
 import { EmployeeDeleteModal } from "../modals/EmployeeDeleteModal";
 import { useFirebase } from "../../contexts/FirebaseContext";
-import { buildNormalizedCollections, formatToDDMMYYYY, toStrictDivision } from "../../utils/firestoreNormalization";
+import {
+  buildNormalizedCollections,
+  formatToDDMMYYYY,
+  normalizeOpnameUpdatedBy,
+  toStrictDivision,
+  type OpnameUpdatedBy,
+} from "../../utils/firestoreNormalization";
 import {
   bulkAddDrShipmentsFirestore,
   bulkAddEmployeesFirestore,
@@ -121,6 +127,7 @@ type MonthlyOpnameCell = {
   in: number;
   idle: number;
   pog: number;
+  updated_by: OpnameUpdatedBy;
 };
 
 const FISCAL_MONTH_COLS: Array<{
@@ -202,9 +209,9 @@ export const TempTab: React.FC<TempTabProps> = ({
     field: "partner_id",
     dir: "asc",
   });
-  const [opnameMetricView, setOpnameMetricView] = useState<"combined" | "in" | "idle" | "pog">(
-    "combined",
-  );
+  const [opnameMetricView, setOpnameMetricView] = useState<
+    "combined" | "in" | "idle" | "pog" | "updated_by"
+  >("combined");
   const [currentPage, setCurrentPage] = useState<number>(1);
   const [pageSize, setPageSize] = useState<number>(50);
   const {
@@ -1038,7 +1045,12 @@ export const TempTab: React.FC<TempTabProps> = ({
         const pogKg = prev !== null && qty < prev ? prev - qty : 0;
         const idleKg = qty;
 
-        monthCells[key] = { in: inKg, idle: idleKg, pog: pogKg };
+        monthCells[key] = {
+          in: inKg,
+          idle: idleKg,
+          pog: pogKg,
+          updated_by: normalizeOpnameUpdatedBy(inv._mUpd[mIdx]),
+        };
         prev = qty;
       });
 
@@ -1049,6 +1061,7 @@ export const TempTab: React.FC<TempTabProps> = ({
           in: inv.stock_qty_kg,
           idle: inv.stock_qty_kg,
           pog: 0,
+          updated_by: "sales",
         };
       }
 
@@ -1223,10 +1236,12 @@ export const TempTab: React.FC<TempTabProps> = ({
       }
       if (val && typeof val === "object" && "idle" in val) {
         const c = val as MonthlyOpnameCell;
+        const upd = normalizeOpnameUpdatedBy(c.updated_by);
         if (opnameMetricView === "in") return [String(c.in)];
         if (opnameMetricView === "idle") return [String(c.idle)];
         if (opnameMetricView === "pog") return [String(c.pog)];
-        return [`In: ${c.in} · Idle: ${c.idle} · POG: ${c.pog}`];
+        if (opnameMetricView === "updated_by") return [upd];
+        return [`In: ${c.in} · Idle: ${c.idle} · POG: ${c.pog} · ${upd}`];
       }
       if (val === null || val === undefined || String(val).trim() === "") {
         return ["(Kosong)"];
@@ -1250,7 +1265,8 @@ export const TempTab: React.FC<TempTabProps> = ({
             if (k === "_raw" || k === "_key") return false;
             if (v && typeof v === "object" && "idle" in v) {
               const c = v as MonthlyOpnameCell;
-              return `${c.in} ${c.idle} ${c.pog}`.toLowerCase().includes(q);
+              const upd = normalizeOpnameUpdatedBy(c.updated_by);
+              return `${c.in} ${c.idle} ${c.pog} ${upd}`.toLowerCase().includes(q);
             }
             const strVal = String(v ?? "").toLowerCase();
             const tooltipVal = (idTooltipMap[String(v)] || "").toLowerCase();
@@ -1278,6 +1294,7 @@ export const TempTab: React.FC<TempTabProps> = ({
             if (!arrMatch) return false;
           } else if (val && typeof val === "object" && "idle" in val) {
             const cell = val as MonthlyOpnameCell;
+            const upd = normalizeOpnameUpdatedBy(cell.updated_by);
             const cellStr =
               opnameMetricView === "in"
                 ? `${cell.in}`
@@ -1285,7 +1302,9 @@ export const TempTab: React.FC<TempTabProps> = ({
                   ? `${cell.idle}`
                   : opnameMetricView === "pog"
                     ? `${cell.pog}`
-                    : `in:${cell.in} idle:${cell.idle} pog:${cell.pog} ${cell.in}/${cell.idle}/${cell.pog}`;
+                    : opnameMetricView === "updated_by"
+                      ? upd
+                      : `in:${cell.in} idle:${cell.idle} pog:${cell.pog} ${cell.in}/${cell.idle}/${cell.pog} ${upd}`;
             if (!cellStr.toLowerCase().includes(query)) return false;
           } else {
             const strVal = String(val ?? "-").toLowerCase();
@@ -1319,6 +1338,9 @@ export const TempTab: React.FC<TempTabProps> = ({
           if (opnameMetricView === "in") return c.in;
           if (opnameMetricView === "idle") return c.idle;
           if (opnameMetricView === "pog") return c.pog;
+          if (opnameMetricView === "updated_by") {
+            return normalizeOpnameUpdatedBy(c.updated_by) === "admin" ? 1 : 2;
+          }
           return c.idle * 10000 + c.pog * 100 + c.in;
         }
         return null;
@@ -1866,6 +1888,7 @@ export const TempTab: React.FC<TempTabProps> = ({
             row[`${key}_in_kg`] = cell ? cell.in : null;
             row[`${key}_idle_kg`] = cell ? cell.idle : null;
             row[`${key}_pog_kg`] = cell ? cell.pog : null;
+            row[`${key}_updated_by`] = cell ? normalizeOpnameUpdatedBy(cell.updated_by) : null;
           });
           return row;
         });
@@ -1890,7 +1913,7 @@ export const TempTab: React.FC<TempTabProps> = ({
       key: "opname_logs",
       count: filteredLogs.length,
       pk: "partner_id + lot_no",
-      fks: "partner_id → partners, checker_id → employees · Bulan: apr → mar {in, idle, pog}",
+      fks: "partner_id → partners, checker_id → employees · Bulan: apr → mar {in, idle, pog, updated_by}",
     },
     {
       key: "dr_shipments",
@@ -2145,9 +2168,9 @@ export const TempTab: React.FC<TempTabProps> = ({
         };
       }
       if (colKey === "opname_logs") {
-        const months: Record<string, { in: string; idle: string; pog: string }> = {};
+        const months: Record<string, { in: string; idle: string; pog: string; updated_by: OpnameUpdatedBy }> = {};
         FISCAL_MONTH_COLS.forEach(({ key }) => {
-          months[key] = { in: "", idle: "", pog: "" };
+          months[key] = { in: "", idle: "", pog: "", updated_by: "sales" };
         });
         return {
           _draftId,
@@ -2249,20 +2272,21 @@ export const TempTab: React.FC<TempTabProps> = ({
     (
       draftId: string,
       monthKey: string,
-      metric: "in" | "idle" | "pog",
+      metric: "in" | "idle" | "pog" | "updated_by",
       val: string,
     ) => {
       setInlineDrafts((prev) => ({
         ...prev,
         opname_logs: prev.opname_logs.map((row) => {
           if (row._draftId !== draftId) return row;
+          const nextVal = metric === "updated_by" ? normalizeOpnameUpdatedBy(val) : val;
           return {
             ...row,
             months: {
               ...row.months,
               [monthKey]: {
-                ...(row.months?.[monthKey] || { in: "", idle: "", pog: "" }),
-                [metric]: val,
+                ...(row.months?.[monthKey] || { in: "", idle: "", pog: "", updated_by: "sales" }),
+                [metric]: nextVal,
               },
             },
           };
@@ -2357,6 +2381,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                   in: Number(cell.in) || 0,
                   idle: Number(cell.idle) || 0,
                   pog: Number(cell.pog) || 0,
+                  updated_by: normalizeOpnameUpdatedBy(cell.updated_by),
                 };
               }
             });
@@ -2476,12 +2501,17 @@ export const TempTab: React.FC<TempTabProps> = ({
 
   const buildEditRowDraft = useCallback((colKey: CollectionKey, row: any) => {
     if (colKey === "opname_logs") {
-      const months: Record<string, { in: string; idle: string; pog: string }> = {};
+      const months: Record<string, { in: string; idle: string; pog: string; updated_by: OpnameUpdatedBy }> = {};
       FISCAL_MONTH_COLS.forEach(({ key }) => {
         const c = row[key];
         months[key] = c
-          ? { in: String(c.in ?? 0), idle: String(c.idle ?? 0), pog: String(c.pog ?? 0) }
-          : { in: "", idle: "", pog: "" };
+          ? {
+              in: String(c.in ?? 0),
+              idle: String(c.idle ?? 0),
+              pog: String(c.pog ?? 0),
+              updated_by: normalizeOpnameUpdatedBy(c.updated_by),
+            }
+          : { in: "", idle: "", pog: "", updated_by: "sales" };
       });
       const part = row.partner_id ? partnerById.get(row.partner_id) : undefined;
       const chk = row.checker_id ? empById.get(row.checker_id) : undefined;
@@ -2642,10 +2672,11 @@ export const TempTab: React.FC<TempTabProps> = ({
   );
 
   const handleUpdateEditOpnameMonthCell = useCallback(
-    (docId: string, monthKey: string, metric: "in" | "idle" | "pog", val: string) => {
+    (docId: string, monthKey: string, metric: "in" | "idle" | "pog" | "updated_by", val: string) => {
       setInlineEdits((prev) => {
         const existingRow = prev.opname_logs?.[docId];
         if (!existingRow) return prev;
+        const nextVal = metric === "updated_by" ? normalizeOpnameUpdatedBy(val) : val;
         return {
           ...prev,
           opname_logs: {
@@ -2655,8 +2686,13 @@ export const TempTab: React.FC<TempTabProps> = ({
               months: {
                 ...existingRow.months,
                 [monthKey]: {
-                  ...(existingRow.months?.[monthKey] || { in: "", idle: "", pog: "" }),
-                  [metric]: val,
+                  ...(existingRow.months?.[monthKey] || {
+                    in: "",
+                    idle: "",
+                    pog: "",
+                    updated_by: "sales",
+                  }),
+                  [metric]: nextVal,
                 },
               },
             },
@@ -2703,7 +2739,12 @@ export const TempTab: React.FC<TempTabProps> = ({
           "checker_name",
           "checker_id",
           "crop_year",
-          ...FISCAL_MONTH_COLS.flatMap((m) => [`${m.key}.in`, `${m.key}.idle`, `${m.key}.pog`]),
+          ...FISCAL_MONTH_COLS.flatMap((m) => [
+            `${m.key}.in`,
+            `${m.key}.idle`,
+            `${m.key}.pog`,
+            `${m.key}.updated_by`,
+          ]),
         ];
       }
       if (colKey === "dr_shipments") {
@@ -2822,13 +2863,24 @@ export const TempTab: React.FC<TempTabProps> = ({
         const rawVal = String(rowValues[c] ?? "").trim();
 
         if (field.includes(".")) {
-          const [mKey, metric] = field.split(".") as [string, "in" | "idle" | "pog"];
-          const currentCell = next.months?.[mKey] || { in: "", idle: "", pog: "" };
+          const [mKey, metric] = field.split(".") as [
+            string,
+            "in" | "idle" | "pog" | "updated_by",
+          ];
+          const currentCell = next.months?.[mKey] || {
+            in: "",
+            idle: "",
+            pog: "",
+            updated_by: "sales",
+          };
           next.months = {
             ...(next.months || {}),
             [mKey]: {
               ...currentCell,
-              [metric]: parsePastedNumber(rawVal),
+              [metric]:
+                metric === "updated_by"
+                  ? normalizeOpnameUpdatedBy(rawVal)
+                  : parsePastedNumber(rawVal),
             },
           };
           continue;
@@ -3169,6 +3221,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                     in: Number(cell.in) || 0,
                     idle: Number(cell.idle) || 0,
                     pog: Number(cell.pog) || 0,
+                    updated_by: normalizeOpnameUpdatedBy(cell.updated_by),
                   };
                 } else {
                   parsedMonths[key] = null;
@@ -4197,6 +4250,17 @@ export const TempTab: React.FC<TempTabProps> = ({
                       >
                         Hanya POG
                       </button>
+                      <button
+                        type="button"
+                        onClick={() => setOpnameMetricView("updated_by")}
+                        className={`px-2.5 py-1.5 rounded-lg text-[11px] font-mono font-bold whitespace-nowrap cursor-pointer transition-colors ${
+                          opnameMetricView === "updated_by"
+                            ? "bg-violet-600 text-white shadow-2xs"
+                            : "text-violet-700 hover:bg-violet-50"
+                        }`}
+                      >
+                        Admin / Sales
+                      </button>
                     </div>
                   </div>
                 </div>
@@ -4495,7 +4559,13 @@ export const TempTab: React.FC<TempTabProps> = ({
                           </select>
                         </td>
                         {FISCAL_MONTH_COLS.map(({ key }) => {
-                          const cell = d.months?.[key] || { in: "", idle: "", pog: "" };
+                          const cell = d.months?.[key] || {
+                            in: "",
+                            idle: "",
+                            pog: "",
+                            updated_by: "sales" as OpnameUpdatedBy,
+                          };
+                          const updRole = normalizeOpnameUpdatedBy(cell.updated_by);
                           return (
                             <td key={key} className="py-1.5 px-1.5 border-l border-emerald-200/70 whitespace-nowrap">
                               <div className="flex items-center gap-1">
@@ -4532,6 +4602,24 @@ export const TempTab: React.FC<TempTabProps> = ({
                                   }
                                   className="h-7 w-12 bg-white border border-emerald-300 focus:border-emerald-600 rounded px-1 text-[10px] text-center font-semibold text-emerald-700 outline-none"
                                 />
+                                <select
+                                  value={updRole}
+                                  title={`${key.toUpperCase()} Updated By (admin / sales)`}
+                                  onPaste={(e) =>
+                                    handlePasteDraftCells("opname_logs", draftIdx, `${key}.updated_by`, e, true)
+                                  }
+                                  onChange={(e) =>
+                                    handleUpdateOpnameMonthCell(d._draftId, key, "updated_by", e.target.value)
+                                  }
+                                  className={`h-7 w-14 border rounded px-1 text-[10px] font-bold uppercase outline-none cursor-pointer ${
+                                    updRole === "admin"
+                                      ? "bg-violet-50 border-violet-300 text-violet-700"
+                                      : "bg-teal-50 border-teal-300 text-teal-700"
+                                  }`}
+                                >
+                                  <option value="sales">sales</option>
+                                  <option value="admin">admin</option>
+                                </select>
                               </div>
                             </td>
                           );
@@ -4849,7 +4937,13 @@ export const TempTab: React.FC<TempTabProps> = ({
                               </select>
                             </td>
                             {FISCAL_MONTH_COLS.map(({ key }) => {
-                              const cell = editRow.months?.[key] || { in: "", idle: "", pog: "" };
+                              const cell = editRow.months?.[key] || {
+                                in: "",
+                                idle: "",
+                                pog: "",
+                                updated_by: "sales" as OpnameUpdatedBy,
+                              };
+                              const updRole = normalizeOpnameUpdatedBy(cell.updated_by);
                               return (
                                 <td key={key} className="py-1.5 px-1.5 border-l border-indigo-200/70 whitespace-nowrap">
                                   <div className="flex items-center gap-1">
@@ -4895,6 +4989,31 @@ export const TempTab: React.FC<TempTabProps> = ({
                                       }
                                       className="h-7 w-12 bg-white border border-emerald-300 focus:border-emerald-600 rounded px-1 text-[10px] text-center font-semibold text-emerald-700 outline-none"
                                     />
+                                    <select
+                                      value={updRole}
+                                      title={`${key.toUpperCase()} Updated By (admin / sales)`}
+                                      onPaste={(e) =>
+                                        handlePasteEditCells(
+                                          "opname_logs",
+                                          paginatedLogs,
+                                          rowIdx,
+                                          `${key}.updated_by`,
+                                          e,
+                                          true,
+                                        )
+                                      }
+                                      onChange={(e) =>
+                                        handleUpdateEditOpnameMonthCell(rowId, key, "updated_by", e.target.value)
+                                      }
+                                      className={`h-7 w-14 border rounded px-1 text-[10px] font-bold uppercase outline-none cursor-pointer ${
+                                        updRole === "admin"
+                                          ? "bg-violet-50 border-violet-300 text-violet-700"
+                                          : "bg-teal-50 border-teal-300 text-teal-700"
+                                      }`}
+                                    >
+                                      <option value="sales">sales</option>
+                                      <option value="admin">admin</option>
+                                    </select>
                                   </div>
                                 </td>
                               );
@@ -4965,6 +5084,7 @@ export const TempTab: React.FC<TempTabProps> = ({
                                 </td>
                               );
                             }
+                            const updRole = normalizeOpnameUpdatedBy(cell.updated_by);
                             if (opnameMetricView === "in") {
                               return (
                                 <td
@@ -4995,6 +5115,24 @@ export const TempTab: React.FC<TempTabProps> = ({
                                 </td>
                               );
                             }
+                            if (opnameMetricView === "updated_by") {
+                              return (
+                                <td
+                                  key={key}
+                                  className="py-2 px-3 text-center border-l border-[#f4f2ff] whitespace-nowrap"
+                                >
+                                  <span
+                                    className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                                      updRole === "admin"
+                                        ? "bg-violet-100 text-violet-700 border border-violet-200"
+                                        : "bg-teal-100 text-teal-700 border border-teal-200"
+                                    }`}
+                                  >
+                                    {updRole}
+                                  </span>
+                                </td>
+                              );
+                            }
                             return (
                               <td
                                 key={key}
@@ -5011,6 +5149,17 @@ export const TempTab: React.FC<TempTabProps> = ({
                                   <span className="text-[#c0c2d4]">|</span>
                                   <span className="text-emerald-700 font-bold" title="POG / Terserap (kg)">
                                     pog:{cell.pog}
+                                  </span>
+                                  <span className="text-[#c0c2d4]">|</span>
+                                  <span
+                                    className={`px-1 py-0.2 rounded font-bold uppercase ${
+                                      updRole === "admin"
+                                        ? "bg-violet-100 text-violet-700"
+                                        : "bg-teal-100 text-teal-700"
+                                    }`}
+                                    title="Diupdate oleh (admin / sales)"
+                                  >
+                                    {updRole}
                                   </span>
                                 </div>
                               </td>

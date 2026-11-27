@@ -60,10 +60,14 @@ service cloud.firestore {
     function isValidMonthCell(cell) {
       return cell == null || (
         cell is map &&
-        cell.size() == 3 &&
+        cell.size() == 4 &&
+        cell.keys().hasAll(['in', 'idle', 'pog', 'updated_by']) &&
+        cell.keys().hasOnly(['in', 'idle', 'pog', 'updated_by']) &&
         cell['in'] >= 0 &&
         cell['idle'] >= 0 &&
-        cell['pog'] >= 0
+        cell['pog'] >= 0 &&
+        cell['updated_by'] is string &&
+        cell['updated_by'] in ['admin', 'sales']
       );
     }
 

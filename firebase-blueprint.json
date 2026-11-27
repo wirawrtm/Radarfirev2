@@ -152,7 +152,7 @@
     },
     "OpnameLog": {
       "title": "OpnameLog",
-      "description": "Monthly fiscal-year opname ledger (Apr-Mar) storing {in, idle, pog} per month.",
+      "description": "Monthly fiscal-year opname ledger (Apr-Mar) storing {in, idle, pog, updated_by} per month, where updated_by is strictly 'admin' or 'sales'.",
       "type": "object",
       "properties": {
         "doc_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },

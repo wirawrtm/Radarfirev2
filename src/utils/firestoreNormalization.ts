@@ -9,10 +9,16 @@ import { MONTH_KEYS } from "./constants";
 
 export type DivisionStrict = "Field Corn" | "Fresh Corn" | "Vegetables";
 
+export type OpnameUpdatedBy = "admin" | "sales";
+
+export const normalizeOpnameUpdatedBy = (raw: any): OpnameUpdatedBy =>
+  String(raw || "").trim().toLowerCase() === "admin" ? "admin" : "sales";
+
 export interface MonthlyOpnameCell {
   in: number;
   idle: number;
   pog: number;
+  updated_by: OpnameUpdatedBy;
 }
 
 export interface EmployeeFsDoc {
@@ -809,7 +815,12 @@ export function buildNormalizedCollections(params: {
       const pogKg = prev !== null && qty < prev ? prev - qty : 0;
       const idleKg = qty;
 
-      monthCells[key] = { in: inKg, idle: idleKg, pog: pogKg };
+      monthCells[key] = {
+        in: inKg,
+        idle: idleKg,
+        pog: pogKg,
+        updated_by: normalizeOpnameUpdatedBy(inv._mUpd[mIdx]),
+      };
       prev = qty;
     });
 
@@ -820,6 +831,7 @@ export function buildNormalizedCollections(params: {
         in: inv.stock_qty_kg,
         idle: inv.stock_qty_kg,
         pog: 0,
+        updated_by: "sales",
       };
     }
 
@@ -1012,7 +1024,7 @@ export function hydrateDashboardFromNormalized(data: NormalizedDataset): {
       row[`in_${key}`] = inVal;
       row[`pog_${key}`] = pogVal;
       row[`has_${key}`] = Boolean(cell);
-      row[`upd_${key}`] = cell ? "sales" : "";
+      row[`upd_${key}`] = cell ? normalizeOpnameUpdatedBy(cell.updated_by) : "";
       if (cell) {
         if (hasAnyCell) prevIdle = latestIdle;
         hasAnyCell = true;

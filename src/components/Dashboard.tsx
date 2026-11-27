@@ -40,6 +40,7 @@ import {
   checkIsBusinessAnalyst,
 } from "../utils/hierarchy";
 import { LogoutConfirmModal } from "./modals/LogoutConfirmModal";
+import { LoadBenchmarkModal } from "./modals/LoadBenchmarkModal";
 import type { OverviewDimension } from "./tabs/OverviewTab";
 import { useFirebase } from "../contexts/FirebaseContext";
 import {
@@ -364,6 +365,8 @@ const Dashboard = ({
 
   // State Tab Partner
   const [isLogoutModalOpen, setIsLogoutModalOpen] = useState(false);
+  const [isBenchmarkModalOpen, setIsBenchmarkModalOpen] = useState(false);
+  const [benchmarkRunNonce, setBenchmarkRunNonce] = useState(0);
 
   const userLevel = useMemo(() => {
     if (!userData) return 0;
@@ -6357,11 +6360,25 @@ const Dashboard = ({
                     <span>Perlu Refresh</span>
                   )}
                 </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setBenchmarkRunNonce((n) => n + 1);
+                    setIsBenchmarkModalOpen(true);
+                  }}
+                  className="h-8 px-2.5 gap-1.5 inline-flex items-center justify-center rounded-lg bg-white/95 hover:bg-white text-[#154be2] border border-white/60 shadow-sm text-[11px] font-bold transition-all cursor-pointer whitespace-nowrap shrink-0"
+                  title="Simulasikan 200 user login bersamaan dan ukur performa website, database & CRUD"
+                >
+                  <span className="material-symbols-outlined text-[16px]">
+                    speed
+                  </span>
+                  <span>Simulasi 200 User</span>
+                </button>
                 {!userData?.isPublic && !isAuthorizedFirebase && (
                   <button
                     type="button"
                     onClick={handleResetToPublicViewer}
-                    className="text-[10px] font-semibold text-white/90 hover:text-white underline underline-offset-2 cursor-pointer"
+                    className="text-[10px] font-semibold text-white/90 hover:text-white underline underline-offset-2 cursor-pointer whitespace-nowrap"
                   >
                     Reset Akses Terbuka
                   </button>
@@ -6861,6 +6878,17 @@ const Dashboard = ({
         isOpen={isLogoutModalOpen}
         onClose={() => setIsLogoutModalOpen(false)}
         onConfirm={onLogout}
+      />
+
+      <LoadBenchmarkModal
+        isOpen={isBenchmarkModalOpen}
+        onClose={() => setIsBenchmarkModalOpen(false)}
+        runNonce={benchmarkRunNonce}
+        employees={employees}
+        kiosks={kiosks}
+        workingData={workingData}
+        accessRules={accessRules}
+        isOnline={isOnline}
       />
     </div>
   );
